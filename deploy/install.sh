@@ -110,43 +110,46 @@ systemctl enable llmrouter.service
 systemctl restart llmrouter.service
 
 echo "==> Configuring UFW firewall (accessible + safe defaults)"
+
 # Never lock yourself out of SSH
-if ss -lnt | grep -qE ':22\s'; || systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
-  ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp comment 'OpenSSH' >/dev/null 2>&1 || true
-else
-  ufw allow 22/tcp comment 'OpenSSH' >/dev/null 2>&1 || true
-fi
+ufw allow OpenSSH >/dev/null 2>&1 || true
+ufw allow 22/tcp comment 'OpenSSH' >/dev/null 2>&1 || true
 
 # Dashboard / API port
-if [[ -n "$ALLOW_FROM" ]]; then
-  # Restrict app port to a trusted network or host
+if [ -n "${ALLOW_FROM}" ]; then
   ufw delete allow "${PORT}/tcp" >/dev/null 2>&1 || true
-  ufw allow from "$ALLOW_FROM" to any port "$PORT" proto tcp comment 'LLMrouterVEX' >/dev/null 2>&1 || \
-    ufw allow from "$ALLOW_FROM" to any port "$PORT" proto tcp >/dev/null
+  if ! ufw allow from "${ALLOW_FROM}" to any port "${PORT}" proto tcp comment 'LLMrouterVEX' >/dev/null 2>&1; then
+    ufw allow from "${ALLOW_FROM}" to any port "${PORT}" proto tcp >/dev/null 2>&1 || true
+  fi
   echo "   Port ${PORT}/tcp allowed only from ${ALLOW_FROM}"
 else
-  ufw allow "${PORT}/tcp" comment 'LLMrouterVEX' >/dev/null 2>&1 || \
-    ufw allow "${PORT}/tcp" >/dev/null
+  if ! ufw allow "${PORT}/tcp" comment 'LLMrouterVEX' >/dev/null 2>&1; then
+    ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
+  fi
   echo "   Port ${PORT}/tcp open (set LLMROUTER_ALLOW_FROM=CIDR to restrict)"
 fi
 
-# Always allow Tailscale interface / CGNAT for mesh access
+# Tailscale mesh access to the dashboard/API
 ufw allow in on tailscale0 to any port "${PORT}" proto tcp comment 'LLMrouterVEX Tailscale' >/dev/null 2>&1 || true
 ufw allow from 100.64.0.0/10 to any port "${PORT}" proto tcp comment 'LLMrouterVEX tailnet' >/dev/null 2>&1 || true
 
-# Default policies if ufw was never configured
+# Default policies
 ufw default deny incoming >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
 
-# Enable without interactive prompt (SSH rule already present)
-if ! ufw status | grep -qi "Status: active"; then
-  ufw --force enable
-else
-  ufw reload >/dev/null 2>&1 || true
-fi
+# Enable without interactive prompt
+UFW_STATUS="$(ufw status 2>/dev/null || true)"
+case "${UFW_STATUS}" in
+  *inactive*|*Inactive*|*"Status: inactive"*)
+    ufw --force enable || true
+    ;;
+  *)
+    ufw reload >/dev/null 2>&1 || true
+    ;;
+esac
 
 echo "==> UFW status"
-ufw status numbered || true
+ufw status numbered 2>/dev/null || ufw status 2>/dev/null || true
 
 # Optional Tailscale join during install
 if [[ -n "$TS_AUTHKEY" ]]; then
