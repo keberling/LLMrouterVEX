@@ -52,12 +52,25 @@ fi
 echo "==> Installing app into ${APP_DIR}"
 mkdir -p "$APP_DIR" "$DATA_DIR"
 
+# Git refuses "dubious ownership" when the tree is owned by another user
+# (e.g. llmrouter) while install runs as root. Fix ownership for update, then
+# hand it back to the service user after npm install.
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+git config --global --add safe.directory "${APP_DIR}.tmp-clone" 2>/dev/null || true
+chown -R root:root "$APP_DIR" 2>/dev/null || true
+
+git_safe() {
+  git -c safe.directory="$APP_DIR" -c safe.directory='*' "$@"
+}
+
 if [[ -d "$APP_DIR/.git" ]]; then
-  git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
-  git -C "$APP_DIR" checkout -B "$BRANCH" "origin/${BRANCH}" 2>/dev/null \
-    || git -C "$APP_DIR" checkout "$BRANCH"
-  git -C "$APP_DIR" reset --hard "origin/${BRANCH}" 2>/dev/null \
-    || git -C "$APP_DIR" pull --ff-only origin "$BRANCH" || true
+  echo "   Updating existing git checkout…"
+  git_safe -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || true
+  git_safe -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
+  git_safe -C "$APP_DIR" checkout -B "$BRANCH" "origin/${BRANCH}" 2>/dev/null \
+    || git_safe -C "$APP_DIR" checkout "$BRANCH"
+  git_safe -C "$APP_DIR" reset --hard "origin/${BRANCH}" 2>/dev/null \
+    || git_safe -C "$APP_DIR" pull --ff-only origin "$BRANCH" || true
 else
   SCRIPT_PATH="${BASH_SOURCE[0]:-}"
   SOURCE_ROOT=""
@@ -77,7 +90,7 @@ else
       "${SOURCE_ROOT}/" "${APP_DIR}/"
   else
     rm -rf "${APP_DIR}.tmp-clone"
-    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "${APP_DIR}.tmp-clone"
+    git -c safe.directory='*' clone --depth 1 --branch "$BRANCH" "$REPO_URL" "${APP_DIR}.tmp-clone"
     rsync -a --delete \
       --exclude node_modules \
       --exclude data \
@@ -89,6 +102,8 @@ fi
 cd "$APP_DIR"
 npm install --omit=dev
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR" "$DATA_DIR"
+# Keep git usable for future root updates
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 
 echo "==> Installing systemd unit"
 cp "$APP_DIR/deploy/llmrouter.service" /etc/systemd/system/llmrouter.service

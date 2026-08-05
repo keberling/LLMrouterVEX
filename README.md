@@ -401,13 +401,23 @@ LLMrouterVEX/
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh | sudo bash
 ```
 
+If you ever see `fatal: detected dubious ownership in repository at '/opt/llmroutervex'`, either re-run the one-liner above (fixed in recent installs) or:
+
+```bash
+sudo git config --global --add safe.directory /opt/llmroutervex
+sudo chown -R root:root /opt/llmroutervex
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh | sudo bash
+```
+
 **Or manual:**
 
 ```bash
+sudo git config --global --add safe.directory /opt/llmroutervex
 cd /opt/llmroutervex
 sudo git fetch origin main
 sudo git reset --hard origin/main
 sudo npm install --omit=dev
+sudo chown -R llmrouter:llmrouter /opt/llmroutervex /var/lib/llmroutervex
 sudo systemctl restart llmrouter
 sudo systemctl status llmrouter --no-pager
 ```
