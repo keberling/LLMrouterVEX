@@ -15,6 +15,62 @@ GitHub: [keberling/LLMrouterVEX](https://github.com/keberling/LLMrouterVEX)
 
 ---
 
+## One-line install (Ubuntu router VM)
+
+Run on the **router VM** (the small Ubuntu box that will receive all app traffic):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh | sudo bash
+```
+
+This installs Node, the app, **systemd auto-start**, and configures **UFW**:
+
+- allows **SSH** (so you are not locked out)
+- allows **8080/tcp** for the dashboard + API
+- default **deny incoming** / allow outgoing
+- enables UFW
+
+Optional flags via env:
+
+```bash
+# Restrict dashboard/API to your LAN only (recommended)
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh \
+  | sudo LLMROUTER_ALLOW_FROM=192.168.1.0/24 bash
+
+# Also set an API bearer token for /v1 and /api/chat
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh \
+  | sudo LLMROUTER_ALLOW_FROM=192.168.1.0/24 LLMROUTER_API_TOKEN='change-me' bash
+```
+
+Then open `http://<router-ip>:8080/`.
+
+---
+
+## One-line Ollama host setup (each GPU / LLM box)
+
+On **every machine running Ollama**, point it at the router VM IP and lock port 11434 to that router only:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- <ROUTER_IP>
+```
+
+Example:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- 192.168.1.20
+```
+
+That script will:
+
+1. Set `OLLAMA_HOST=0.0.0.0:11434` (LAN-reachable)
+2. Restart Ollama
+3. Configure **UFW** so **only the router IP** can reach port **11434**
+4. Keep SSH open
+
+Then on the router dashboard → **Servers** → add the Ollama host IP.
+
+---
+
 ## Architecture
 
 ```
@@ -49,29 +105,22 @@ If Ollama is running on the same machine, it is auto-seeded as `local`.
 
 ---
 
-## Deploy on Ubuntu (auto-start)
+## Deploy on Ubuntu (details)
 
 ### Requirements
 
 - Ubuntu 22.04 / 24.04 (small VM is fine: 1 vCPU, 1–2 GB RAM)
-- Outbound/inbound access to Ollama hosts on port **11434**
+- Network path from router → Ollama hosts on port **11434**
 - Node 18+ (installer uses Node 20)
 
-### One-shot install
-
-From a git checkout of this repo:
-
-```bash
-sudo bash deploy/install.sh
-```
-
-This will:
+### What the install script does
 
 1. Install Node.js 20 if needed  
 2. Install the app under `/opt/llmroutervex`  
 3. Create user `llmrouter` and data dir `/var/lib/llmroutervex`  
 4. Install and enable **systemd** unit `llmrouter.service`  
 5. Start the service on boot  
+6. Configure **UFW** (SSH + app port, deny other inbound)
 
 ### Service commands
 
@@ -83,8 +132,6 @@ sudo journalctl -u llmrouter -f
 
 ### Environment (optional)
 
-Edit the unit or use a drop-in:
-
 ```bash
 sudo systemctl edit llmrouter
 ```
@@ -95,47 +142,36 @@ Environment=PORT=8080
 Environment=HOST=0.0.0.0
 Environment=LLMROUTER_DATA=/var/lib/llmroutervex
 Environment=DISCOVERY_INTERVAL_MS=15000
-# Optional shared secret for /v1 and /api/chat:
-# Environment=LLMROUTER_API_TOKEN=super-secret
+Environment=LLMROUTER_API_TOKEN=super-secret
 ```
-
-Then:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart llmrouter
 ```
 
-### Firewall
+### Firewall notes (router VM)
+
+| Rule | Purpose |
+|------|---------|
+| OpenSSH / 22 | Keep remote access |
+| 8080/tcp | Dashboard + API for your apps |
+| default deny incoming | Block everything else |
+| default allow outgoing | Router can reach Ollama workers |
+
+Restrict 8080 to your LAN:
 
 ```bash
-sudo ufw allow 8080/tcp
+sudo ufw delete allow 8080/tcp
+sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp comment 'LLMrouterVEX'
 sudo ufw reload
 ```
 
----
+### Firewall notes (Ollama workers)
 
-## Configure Ollama hosts (required)
+The configure script only allows **11434 from the router IP**, not the whole world.
 
-By default Ollama only listens on `127.0.0.1`. On **each** worker machine:
-
-```bash
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null <<'EOF'
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-EOF
-sudo systemctl daemon-reload
-sudo systemctl restart ollama
-```
-
-Allow the router VM to reach it:
-
-```bash
-sudo ufw allow from <ROUTER_VM_IP> to any port 11434
-```
-
-Test from the router VM:
+Test from the **router VM**:
 
 ```bash
 curl http://<OLLAMA_IP>:11434/api/tags
@@ -149,7 +185,7 @@ curl http://<OLLAMA_IP>:11434/api/tags
 2. Enter IP or `IP:11434` or full URL
 3. Save — router probes immediately and lists models
 
-You can also use the API:
+API:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/api/servers \
