@@ -1,0 +1,27 @@
+[Unit]
+Description=LLMrouterVEX multi-server Ollama router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=llmrouter
+Group=llmrouter
+WorkingDirectory=/opt/llmroutervex
+Environment=NODE_ENV=production
+Environment=PORT=8080
+Environment=HOST=0.0.0.0
+Environment=LLMROUTER_DATA=/var/lib/llmroutervex
+# Optional: Environment=LLMROUTER_API_TOKEN=change-me
+ExecStart=/usr/bin/node /opt/llmroutervex/server/index.js
+Restart=on-failure
+RestartSec=3
+# Hardening (safe defaults for a small VM)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/llmroutervex
+
+[Install]
+WantedBy=multi-user.target

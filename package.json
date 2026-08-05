@@ -1,0 +1,27 @@
+{
+  "name": "llmroutervex",
+  "version": "1.0.0",
+  "description": "Multi-server Ollama LLM router with auto-discovery, load balancing, and dashboard",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "keywords": [
+    "ollama",
+    "llm",
+    "router",
+    "load-balancer",
+    "openai-compatible"
+  ],
+  "author": "keberling",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "uuid": "^11.1.0"
+  }
+}

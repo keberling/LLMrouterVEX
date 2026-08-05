@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLMrouterVEX · Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">R</div>
+          <div>
+            <h1>LLMrouterVEX</h1>
+            <p>Multi-server Ollama router · discovery · load balance</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <a class="active" href="/">Dashboard</a>
+          <a href="/servers">Servers</a>
+          <button class="btn" id="btn-refresh" type="button">Refresh now</button>
+        </nav>
+      </header>
+
+      <div class="stats-row" id="totals">
+        <div class="stat-card">
+          <div class="label">Servers</div>
+          <div class="value" id="t-servers">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Healthy</div>
+          <div class="value ok" id="t-healthy">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Unique models</div>
+          <div class="value" id="t-models">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">Active gens</div>
+          <div class="value" id="t-active">—</div>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h2>Ollama servers</h2>
+        <span id="last-updated">Waiting for data…</span>
+      </div>
+      <div class="grid" id="server-cards">
+        <div class="empty">No servers yet. <a href="/servers">Add one by IP</a>.</div>
+      </div>
+
+      <div class="section-title" style="margin-top: 28px">
+        <h2>Model catalog</h2>
+        <span>Across all healthy hosts</span>
+      </div>
+      <div style="overflow-x: auto">
+        <table class="models" id="model-table">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Size / params</th>
+              <th>Tags</th>
+              <th>Available on</th>
+            </tr>
+          </thead>
+          <tbody id="model-body">
+            <tr><td colspan="4" class="muted">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="api-box">
+        <strong>Point your apps here</strong>
+        <p class="help" style="margin: 6px 0 0">
+          OpenAI-compatible endpoint (model <code class="mono">auto</code> enables smart routing):
+        </p>
+        <pre id="api-sample">POST /v1/chat/completions
+{
+  "model": "auto",
+  "messages": [{ "role": "user", "content": "Hello" }],
+  "stream": true
+}</pre>
+      </div>
+    </div>
+    <script src="/dashboard.js"></script>
+  </body>
+</html>

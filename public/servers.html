@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLMrouterVEX · Servers</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">R</div>
+          <div>
+            <h1>Manage servers</h1>
+            <p>Add Ollama hosts by IP — models discover automatically</p>
+          </div>
+        </div>
+        <nav class="nav">
+          <a href="/">Dashboard</a>
+          <a class="active" href="/servers">Servers</a>
+        </nav>
+      </header>
+
+      <section class="form-card">
+        <h2>Add Ollama server</h2>
+        <form id="add-form">
+          <label for="host">Host / IP (required)</label>
+          <input
+            id="host"
+            name="host"
+            type="text"
+            placeholder="192.168.1.50  or  192.168.1.50:11434  or  http://10.0.0.8:11434"
+            required
+            autocomplete="off"
+          />
+          <p class="help">
+            Port defaults to <strong>11434</strong>. On each Ollama host set
+            <code class="mono">OLLAMA_HOST=0.0.0.0:11434</code> so the router can reach it.
+          </p>
+
+          <label for="name">Display name (optional)</label>
+          <input id="name" name="name" type="text" placeholder="gpu-box-1" />
+
+          <label for="notes">Notes (optional)</label>
+          <textarea id="notes" name="notes" rows="2" placeholder="Rack A, RTX 5060 Ti"></textarea>
+
+          <div class="form-row">
+            <button class="btn btn-primary" type="submit" id="add-btn">Add server</button>
+            <span class="help" id="add-status"></span>
+          </div>
+        </form>
+      </section>
+
+      <div class="section-title">
+        <h2>Registered servers</h2>
+        <span id="count-label">0</span>
+      </div>
+      <div class="grid" id="server-list"></div>
+    </div>
+    <script src="/servers.js"></script>
+  </body>
+</html>
