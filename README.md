@@ -53,41 +53,70 @@ Then open `http://<router-ip>:8080/` or `http://<tailscale-ip>:8080/`.
 
 ---
 
-## One-line Tailscale join (router or GPU host)
+## One-line Tailscale join
 
 Create an auth key: https://login.tailscale.com/admin/settings/keys
+
+### Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.sh \
   | sudo TS_AUTHKEY=tskey-auth-XXXX TS_HOSTNAME=llm-router bash
 ```
 
+### Windows (Admin PowerShell)
+
+```powershell
+$env:TS_AUTHKEY='tskey-auth-XXXX'; $env:TS_HOSTNAME='gpu-box'
+irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.ps1 | iex
+```
+
 ---
 
 ## One-line Ollama host setup (each GPU / LLM box)
 
-On **every machine running Ollama**, allow only the router (LAN **or Tailscale IP**):
+On **every machine running Ollama**, allow only the router (LAN **or Tailscale IP**).
+
+### Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- <ROUTER_IP>
 ```
 
-Examples:
-
 ```bash
-# LAN router
-curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- 192.168.1.20
-
 # Tailscale router (recommended for remote boxes)
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- 100.64.0.12
 ```
 
-That script will:
+Does: bind Ollama to `0.0.0.0:11434`, restart Ollama, **UFW** allow **11434 only from router** (+ tailnet helpers for `100.x` routers).
 
-1. Set `OLLAMA_HOST=0.0.0.0:11434`
-2. Restart Ollama
-3. Configure **UFW** so **only the router IP** can reach port **11434** (and tailnet helpers when the router IP is Tailscale)
-4. Keep SSH open
+### Windows (Admin PowerShell)
+
+```powershell
+# Configure Ollama + Windows Firewall for the router (use router Tailscale IP)
+$env:ROUTER_IP='100.64.0.12'
+irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.ps1 | iex
+```
+
+Join Tailscale **and** configure Ollama in one shot:
+
+```powershell
+$env:ROUTER_IP='100.64.0.12'
+$env:TS_AUTHKEY='tskey-auth-XXXX'
+$env:TS_HOSTNAME='gpu-pc'
+irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.ps1 | iex
+```
+
+Windows script does:
+
+1. Optional Tailscale install/join (`TS_AUTHKEY`)
+2. Sets **machine + user** env `OLLAMA_HOST=0.0.0.0:11434`
+3. Restarts Ollama
+4. **Windows Firewall** inbound TCP **11434** from the router IP  
+   (and `100.64.0.0/10` when the router IP is Tailscale)
+5. Prints this machine’s Tailscale IP to add on the router UI
+
+> If Ollama was already running in the tray, fully quit it and reopen once so it reloads `OLLAMA_HOST`.
 
 Then on the router → **Servers**:
 
