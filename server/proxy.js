@@ -70,17 +70,11 @@ function pickRoute({ messages, model, think }) {
         status: 404,
       };
     }
-    const modelName = matches[0].profile.name;
     // Prefer exact name matches when several tags exist
     const exact = matches.filter((c) => c.profile.name === model);
     const pool = exact.length ? exact : matches;
+    const modelName = pool[0].profile.name;
     const w = pickBalancedServer(pool, modelName) || pool[0];
-    const dist = pool
-      .map(
-        (c) =>
-          `${c.serverName}:${c.totalRequests ?? 0}req/${c.active || 0}act`
-      )
-      .join(", ");
     return {
       pick: {
         serverId: w.serverId,
@@ -89,7 +83,7 @@ function pickRoute({ messages, model, think }) {
         model: w.profile.name,
         score: w.score,
       },
-      reason: `Explicit ${w.profile.name} @ ${w.serverName} · equal-LB [${dist}]`,
+      reason: `Explicit ${w.profile.name} @ ${w.serverName} — ${(w.reasons || []).slice(-1)[0] || "load-balanced"}`,
       classification: null,
       ranked: pool.slice(0, 8),
     };

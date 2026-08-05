@@ -221,17 +221,17 @@ function scoreCandidate(candidate, classification) {
     }
   }
 
-  // Mild preference for already-loaded weights (do NOT dominate LB)
+  // Loaded-in-VRAM is handled in pickBalancedServer (hard preference),
+  // not as a huge score bias that breaks multi-host balancing.
   if (loaded) {
-    score += 4;
+    score += 2;
     reasons.push("already loaded");
   }
 
-  // Soft load signals (hard equalizing happens after model pick)
+  // Soft in-flight signal
   score -= Math.min(24, (active || 0) * 8);
   if (active > 0) reasons.push(`active:${active}`);
 
-  // Tiny latency nudge only (never starve a healthy peer)
   if (latencyMs != null && latencyMs > 0) {
     if (latencyMs > 1500) score -= 8;
     else if (latencyMs > 800) score -= 3;
@@ -243,50 +243,95 @@ function scoreCandidate(candidate, classification) {
 /** Round-robin counters per model name (in-process) */
 const rrByModel = new Map();
 
+/** If every VRAM-resident host is this busy, allow cold-start spill */
+const MAX_ACTIVE_BEFORE_COLD_SPILL = Number(
+  process.env.LLMROUTER_MAX_ACTIVE_BEFORE_COLD_SPILL || 3
+);
+
 function nextRr(modelName) {
   const n = (rrByModel.get(modelName) || 0) + 1;
   rrByModel.set(modelName, n);
   return n;
 }
 
+function reqCount(c) {
+  return c.totalRequests ?? c.statsRequests ?? 0;
+}
+
 /**
- * Among candidates for the same chosen model, pick the server that has
- * received the fewest completed requests (then fewest active, then RR).
+ * Among candidates for the same model:
+ *  1) Prefer hosts that already have it loaded in VRAM (avoid cold load / queue jump)
+ *  2) Among that set, equalize by active jobs then request counts, then RR
+ *  3) Only cold-start on another host if nobody has it loaded, or all loaded
+ *     hosts are saturated (active >= MAX_ACTIVE_BEFORE_COLD_SPILL)
  */
 function pickBalancedServer(pool, modelName) {
   if (!pool.length) return null;
   if (pool.length === 1) return pool[0];
 
+  const loaded = pool.filter((c) => c.loaded);
+  const cold = pool.filter((c) => !c.loaded);
+
+  let prefer = pool;
+  let mode = "all";
+
+  if (loaded.length > 0) {
+    const minLoadedActive = Math.min(...loaded.map((c) => c.active || 0));
+    // Stick to VRAM-resident hosts unless every one is saturated
+    if (minLoadedActive < MAX_ACTIVE_BEFORE_COLD_SPILL || cold.length === 0) {
+      prefer = loaded;
+      mode = "vram-sticky";
+    } else {
+      // Spill: allow cold hosts that are idle, still prefer least active overall
+      prefer = [...loaded, ...cold.filter((c) => (c.active || 0) === 0)];
+      mode = "vram-spill";
+    }
+  } else {
+    mode = "cold-balance";
+  }
+
   const rr = nextRr(modelName);
-  const sorted = [...pool].sort((a, b) => {
-    const aReq = a.totalRequests ?? a.statsRequests ?? 0;
-    const bReq = b.totalRequests ?? b.statsRequests ?? 0;
+  const sorted = [...prefer].sort((a, b) => {
     const aAct = a.active || 0;
     const bAct = b.active || 0;
-    // Equalize completed request counts first
-    if (aReq !== bReq) return aReq - bReq;
-    // Then prefer fewer in-flight generations
+    // Prefer free GPUs first (queue fairness)
     if (aAct !== bAct) return aAct - bAct;
-    // Stable-ish rotation when fully tied
+    // Then equalize historical request counts
+    const aReq = reqCount(a);
+    const bReq = reqCount(b);
+    if (aReq !== bReq) return aReq - bReq;
+    // Prefer already-loaded when both allowed (spill mode)
+    if (Boolean(a.loaded) !== Boolean(b.loaded)) {
+      return a.loaded ? -1 : 1;
+    }
     const aKey = String(a.serverId || "");
     const bKey = String(b.serverId || "");
     if (aKey === bKey) return 0;
-    // Rotate starting index by rr among sorted-by-id order
     return aKey < bKey ? -1 : 1;
   });
 
-  // When top two are tied on requests+active, rotate
   const top = sorted[0];
   const tied = sorted.filter(
     (c) =>
-      (c.totalRequests ?? c.statsRequests ?? 0) ===
-        (top.totalRequests ?? top.statsRequests ?? 0) &&
-      (c.active || 0) === (top.active || 0)
+      (c.active || 0) === (top.active || 0) &&
+      reqCount(c) === reqCount(top) &&
+      Boolean(c.loaded) === Boolean(top.loaded)
   );
-  if (tied.length > 1) {
-    return tied[rr % tied.length];
+  const winner = tied.length > 1 ? tied[rr % tied.length] : top;
+
+  if (winner) {
+    const snapshot = prefer
+      .map(
+        (c) =>
+          `${c.serverName}${c.loaded ? "*" : ""}:${reqCount(c)}req/${c.active || 0}act`
+      )
+      .join(", ");
+    winner.reasons = [
+      ...(winner.reasons || []),
+      `lb:${mode}[${prefer.length}: ${snapshot}]`,
+    ];
   }
-  return top;
+  return winner;
 }
 
 /**
@@ -304,9 +349,7 @@ function selectCandidate(scoredList) {
   const best = ordered[0];
   const modelName = best.profile.name;
 
-  // Pool: every healthy server offering that same model, within a small
-  // quality band of the best score for that model on that host.
-  // (Usually all identical models score the same.)
+  // Pool: every healthy server offering that same model within a quality band
   const SCORE_BAND = 12;
   const pool = ordered.filter(
     (c) =>
@@ -315,20 +358,7 @@ function selectCandidate(scoredList) {
       c.score >= best.score - SCORE_BAND
   );
 
-  const winner = pickBalancedServer(pool.length ? pool : [best], modelName);
-  if (winner && pool.length > 1) {
-    const reqs = pool
-      .map(
-        (c) =>
-          `${c.serverName}:${c.totalRequests ?? c.statsRequests ?? 0}req/${c.active || 0}act`
-      )
-      .join(", ");
-    winner.reasons = [
-      ...(winner.reasons || []),
-      `lb[${pool.length} hosts: ${reqs}]`,
-    ];
-  }
-  return winner;
+  return pickBalancedServer(pool.length ? pool : [best], modelName);
 }
 
 /**

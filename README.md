@@ -336,8 +336,13 @@ Send OpenAI-style image parts, or Ollama-style `images: ["<base64>"]` via `/api/
 | Short scripts / simple Q&A | Smaller models (avoid 20B/27B) |
 | Hard reasoning / long complex code | Larger models allowed |
 | Images / OCR | Vision models (`qwen3-vl`, etc.) |
-| Same model on many hosts | Least active + already loaded |
+| Model already in VRAM on a host | **Use that host** (don’t cold-load elsewhere) |
+| Same model loaded on several hosts | Equalize by active jobs, then request counts, then RR |
+| Nobody has it loaded yet | Equalize cold-starts across hosts |
+| Loaded hosts all saturated (`active ≥ 3`) | May spill to an idle host (cold load) |
 | Server down | Removed from candidate pool automatically |
+
+Env: `LLMROUTER_MAX_ACTIVE_BEFORE_COLD_SPILL=3` (default) controls when a busy VRAM-resident host may spill to a cold peer.
 
 ---
 
