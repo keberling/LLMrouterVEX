@@ -66,10 +66,34 @@ curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/
 
 ### Windows (Admin PowerShell)
 
+**If the repo is public:**
+
 ```powershell
 $env:TS_AUTHKEY='tskey-auth-XXXX'; $env:TS_HOSTNAME='gpu-box'
 irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.ps1 | iex
 ```
+
+**If the repo is private** (`irm` → **404 Not Found** is expected without auth). Use a local clone instead:
+
+```powershell
+# Admin PowerShell
+cd $env:USERPROFILE\Documents\LLMrouterVEX   # or: git clone https://github.com/keberling/LLMrouterVEX.git
+git pull
+$env:TS_AUTHKEY='tskey-auth-XXXX'
+$env:TS_HOSTNAME='gpu-box'
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\install-tailscale.ps1
+```
+
+Or one-liner with a GitHub token (classic PAT with `repo` scope):
+
+```powershell
+$env:TS_AUTHKEY='tskey-auth-XXXX'; $env:TS_HOSTNAME='gpu-box'
+$h=@{ Authorization = "Bearer $env:GITHUB_TOKEN"; "User-Agent"="llmrouter" }
+irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.ps1 -Headers $h | iex
+```
+
+> **Tip:** Settings → General → **Change repository visibility** → Public makes the simple `irm … | iex` one-liners work for everyone.
 
 ---
 
@@ -92,9 +116,10 @@ Does: bind Ollama to `0.0.0.0:11434`, restart Ollama, **UFW** allow **11434 only
 
 ### Windows (Admin PowerShell)
 
+**Public repo:**
+
 ```powershell
-# Configure Ollama + Windows Firewall for the router (use router Tailscale IP)
-$env:ROUTER_IP='100.64.0.12'
+$env:ROUTER_IP='100.64.0.12'   # router Tailscale IP
 irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.ps1 | iex
 ```
 
@@ -105,6 +130,18 @@ $env:ROUTER_IP='100.64.0.12'
 $env:TS_AUTHKEY='tskey-auth-XXXX'
 $env:TS_HOSTNAME='gpu-pc'
 irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.ps1 | iex
+```
+
+**Private repo (local clone — avoids 404):**
+
+```powershell
+cd $env:USERPROFILE\Documents\LLMrouterVEX
+git pull
+$env:ROUTER_IP='100.64.0.12'
+$env:TS_AUTHKEY='tskey-auth-XXXX'   # optional
+$env:TS_HOSTNAME='gpu-pc'
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\configure-ollama-host.ps1
 ```
 
 Windows script does:
