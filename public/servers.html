@@ -25,18 +25,18 @@
       <section class="form-card">
         <h2>Add Ollama server</h2>
         <form id="add-form">
-          <label for="host">Host / IP (required)</label>
+          <label for="host">Host / IP / Tailscale name (required)</label>
           <input
             id="host"
             name="host"
             type="text"
-            placeholder="192.168.1.50  or  192.168.1.50:11434  or  http://10.0.0.8:11434"
+            placeholder="192.168.1.50 · 100.64.0.12 · gpu-box.tailnet.ts.net · host:11434"
             required
             autocomplete="off"
           />
           <p class="help">
-            Port defaults to <strong>11434</strong>. On each Ollama host set
-            <code class="mono">OLLAMA_HOST=0.0.0.0:11434</code> so the router can reach it.
+            Port defaults to <strong>11434</strong>. Use LAN IP, <strong>Tailscale IP</strong>, or MagicDNS name.
+            Workers need Ollama bound to <code class="mono">0.0.0.0:11434</code>.
           </p>
 
           <label for="name">Display name (optional)</label>
@@ -53,6 +53,14 @@
       </section>
 
       <div class="section-title">
+        <h2>Tailscale peers with Ollama</h2>
+        <span id="ts-label">Scanning…</span>
+      </div>
+      <div class="grid" id="ts-peers">
+        <div class="empty muted">Checking Tailscale…</div>
+      </div>
+
+      <div class="section-title" style="margin-top:28px">
         <h2>Registered servers</h2>
         <span id="count-label">0</span>
       </div>

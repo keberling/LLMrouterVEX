@@ -8,6 +8,8 @@
 #   PORT=8080
 #   LLMROUTER_ALLOW_FROM=192.168.1.0/24   # restrict dashboard/API to a subnet
 #   LLMROUTER_API_TOKEN=secret            # require Bearer token on /v1 and /api/chat
+#   TS_AUTHKEY=tskey-auth-...             # join Tailscale during install
+#   TS_HOSTNAME=llm-router
 #   BRANCH=main
 #   REPO_URL=https://github.com/keberling/LLMrouterVEX.git
 set -euo pipefail
@@ -21,6 +23,8 @@ BRANCH="${BRANCH:-main}"
 PORT="${PORT:-8080}"
 ALLOW_FROM="${LLMROUTER_ALLOW_FROM:-}"
 API_TOKEN="${LLMROUTER_API_TOKEN:-}"
+TS_AUTHKEY="${TS_AUTHKEY:-}"
+TS_HOSTNAME="${TS_HOSTNAME:-llm-router}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Please run as root (use the curl | sudo bash one-liner)."
@@ -126,6 +130,10 @@ else
   echo "   Port ${PORT}/tcp open (set LLMROUTER_ALLOW_FROM=CIDR to restrict)"
 fi
 
+# Always allow Tailscale interface / CGNAT for mesh access
+ufw allow in on tailscale0 to any port "${PORT}" proto tcp comment 'LLMrouterVEX Tailscale' >/dev/null 2>&1 || true
+ufw allow from 100.64.0.0/10 to any port "${PORT}" proto tcp comment 'LLMrouterVEX tailnet' >/dev/null 2>&1 || true
+
 # Default policies if ufw was never configured
 ufw default deny incoming >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
@@ -140,21 +148,43 @@ fi
 echo "==> UFW status"
 ufw status numbered || true
 
+# Optional Tailscale join during install
+if [[ -n "$TS_AUTHKEY" ]]; then
+  echo "==> Joining Tailscale (TS_AUTHKEY provided)"
+  if [[ -f "$APP_DIR/deploy/install-tailscale.sh" ]]; then
+    bash "$APP_DIR/deploy/install-tailscale.sh" || true
+  else
+    curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.sh \
+      | TS_AUTHKEY="$TS_AUTHKEY" TS_HOSTNAME="$TS_HOSTNAME" bash || true
+  fi
+fi
+
 sleep 1
 systemctl --no-pager --full status llmrouter.service || true
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true)"
 echo ""
 echo "============================================================"
 echo " LLMrouterVEX installed + enabled on boot"
 echo " Dashboard:  http://${IP:-<vm-ip>}:${PORT}/"
-echo " Servers:    http://${IP:-<vm-ip>}:${PORT}/servers"
-echo " OpenAI API: http://${IP:-<vm-ip>}:${PORT}/v1/chat/completions"
+if [[ -n "$TS_IP" ]]; then
+  echo " Tailscale:  http://${TS_IP}:${PORT}/"
+fi
+echo " Servers:    http://${IP:-${TS_IP:-<vm-ip>}}:${PORT}/servers"
+echo " OpenAI API: http://${IP:-${TS_IP:-<vm-ip>}}:${PORT}/v1/chat/completions"
 echo " Data:       ${DATA_DIR}"
 echo " Logs:       journalctl -u llmrouter -f"
-echo " Firewall:   UFW active · SSH + :${PORT} allowed"
+echo " Firewall:   UFW active · SSH + :${PORT} (+ Tailscale if present)"
 echo "============================================================"
 echo ""
-echo "On EACH Ollama worker, run (replace ROUTER_IP):"
-echo "  curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- ${IP:-ROUTER_IP}"
+if [[ -z "$TS_AUTHKEY" ]]; then
+  echo "Optional Tailscale join (router VM):"
+  echo "  curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.sh \\"
+  echo "    | sudo TS_AUTHKEY=tskey-auth-XXXX TS_HOSTNAME=${TS_HOSTNAME} bash"
+  echo ""
+fi
+echo "On EACH Ollama worker (LAN or Tailscale IP of this router):"
+echo "  curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh \\"
+echo "    | sudo bash -s -- ${TS_IP:-${IP:-ROUTER_IP}}"
 echo ""

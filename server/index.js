@@ -11,6 +11,7 @@ const {
   ollamaChunkToOpenAI,
   ollamaDoneToOpenAI,
 } = require("./proxy");
+const tailscale = require("./tailscale");
 
 store.ensureDataDir();
 
@@ -48,14 +49,89 @@ async function refreshAll() {
 
 // ── Admin / dashboard API ───────────────────────────────────────────
 
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
   const summary = discovery.catalogSummary();
+  let ts = null;
+  try {
+    ts = await tailscale.getStatus();
+  } catch {
+    ts = { available: false };
+  }
   res.json({
     ok: true,
     service: "LLMrouterVEX",
     version: "1.0.0",
     totals: summary.totals,
+    tailscale: {
+      installed: Boolean(ts.installed),
+      running: Boolean(ts.running),
+      ip: ts.self?.ips?.[0] || null,
+      hostName: ts.self?.hostName || ts.self?.dnsName || null,
+    },
   });
+});
+
+/** Tailscale status + peers (for mesh server discovery) */
+app.get("/api/tailscale", async (_req, res) => {
+  try {
+    const data = await tailscale.listPeersWithOllama();
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/** Quick status without probing every peer for Ollama */
+app.get("/api/tailscale/status", async (_req, res) => {
+  try {
+    const data = await tailscale.getStatus();
+    res.json({ ok: true, ...data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/**
+ * Register an Ollama server from a Tailscale peer.
+ * Body: { host?, ip?, dnsName?, name?, port? }
+ */
+app.post("/api/tailscale/add", async (req, res) => {
+  try {
+    const { host, ip, dnsName, name, port } = req.body || {};
+    const target =
+      host ||
+      ip ||
+      dnsName ||
+      (Array.isArray(req.body?.ips) ? req.body.ips[0] : null);
+    if (!target) {
+      return res.status(400).json({
+        ok: false,
+        error: "host, ip, or dnsName is required",
+      });
+    }
+    const p = port || 11434;
+    const hostSpec = String(target).includes(":")
+      ? String(target)
+      : `${target}:${p}`;
+    const display =
+      name ||
+      dnsName ||
+      (typeof target === "string" ? target.split(".")[0] : "tailscale-node");
+    const server = store.addServer({
+      name: display,
+      host: hostSpec,
+      notes: "Added via Tailscale",
+      enabled: true,
+    });
+    discovery.ensureRuntime(server);
+    await discovery.probeServer(server);
+    res.status(201).json({
+      ok: true,
+      server: { ...server, runtime: discovery.getRuntime(server.id) },
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
 });
 
 app.get("/api/servers", (_req, res) => {

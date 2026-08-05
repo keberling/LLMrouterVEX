@@ -120,6 +120,33 @@ async function loadCatalog() {
   $("#t-models").textContent = data.totals?.models ?? 0;
   $("#t-active").textContent = data.totals?.active ?? 0;
 
+  // Tailscale panel
+  try {
+    const ts = await fetch("/api/tailscale/status").then((r) => r.json());
+    if (!ts.installed) {
+      $("#ts-state").textContent = "Not installed";
+      $("#ts-self").textContent = "—";
+      $("#ts-ip").textContent = "—";
+      $("#ts-peers").textContent = "—";
+    } else if (!ts.running) {
+      $("#ts-state").textContent = ts.backendState || "Stopped";
+      $("#ts-self").textContent = ts.error || "—";
+      $("#ts-ip").textContent = "—";
+      $("#ts-peers").textContent = String((ts.peers || []).length);
+    } else {
+      $("#ts-state").textContent = "Connected";
+      $("#ts-state").style.color = "var(--accent)";
+      const selfName = ts.self?.dnsName || ts.self?.hostName || "this-node";
+      $("#ts-self").textContent = selfName;
+      $("#ts-ip").textContent = (ts.self?.ips || []).join(", ") || "—";
+      const online = (ts.peers || []).filter((p) => p.online).length;
+      $("#ts-peers").textContent = `${online} online / ${(ts.peers || []).length} total`;
+      $("#ts-help").innerHTML = `Add GPU peers on the <a href="/servers">Servers</a> page · MagicDNS works as hostnames.`;
+    }
+  } catch {
+    $("#ts-state").textContent = "Unavailable";
+  }
+
   const cards = $("#server-cards");
   // Need full server list with registry fields — fetch /api/servers
   const sr = await fetch("/api/servers");

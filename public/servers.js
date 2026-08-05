@@ -57,10 +57,84 @@ function renderList(servers) {
     .join("");
 }
 
+function renderTailscale(data) {
+  const root = $("#ts-peers");
+  const label = $("#ts-label");
+  if (!data || !data.installed) {
+    label.textContent = "not installed";
+    root.innerHTML = `<div class="empty">Tailscale not installed on this router.
+      <div class="help" style="margin-top:10px">
+        <code class="mono">curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.sh | sudo TS_AUTHKEY=tskey-auth-XXXX bash</code>
+      </div>
+    </div>`;
+    return;
+  }
+  if (!data.running) {
+    label.textContent = data.backendState || "offline";
+    root.innerHTML = `<div class="empty">Tailscale installed but not connected.
+      <div class="help" style="margin-top:8px">${esc(data.error || "Run: sudo tailscale up")}</div>
+    </div>`;
+    return;
+  }
+
+  const peers = data.peers || [];
+  const withOllama = peers.filter((p) => p.ollama?.reachable);
+  const online = peers.filter((p) => p.online).length;
+  label.textContent = `${withOllama.length} Ollama · ${online}/${peers.length} peers online`;
+
+  if (!peers.length) {
+    root.innerHTML = `<div class="empty">No Tailscale peers yet. Join GPU hosts to the same tailnet.</div>`;
+    return;
+  }
+
+  root.innerHTML = peers
+    .map((p) => {
+      const ip = (p.ips || [])[0] || "";
+      const ollama = p.ollama || {};
+      const models = (ollama.models || [])
+        .slice(0, 6)
+        .map((m) => `<span class="chip">${esc(m)}</span>`)
+        .join("");
+      return `
+      <article class="card${!p.online ? " offline" : ""}">
+        <div class="card-head">
+          <div>
+            <h3>${esc(p.hostName)}</h3>
+            <div class="mono small muted">${esc(p.dnsName || ip || "—")}</div>
+          </div>
+          <span class="badge ${p.online ? "ok" : "bad"}">${p.online ? "online" : "offline"}</span>
+        </div>
+        <div class="kv"><span>Tailscale IP</span><span class="mono">${esc(ip || "—")}</span></div>
+        <div class="kv"><span>Ollama</span><span class="mono">${ollama.reachable ? esc(ollama.version || "yes") : "not detected"}</span></div>
+        <div class="chips">${models || (ollama.reachable ? "" : '<span class="muted small">No /api/tags on :11434</span>')}</div>
+        <div class="card-actions">
+          <button class="btn btn-primary" type="button" data-ts-add
+            data-ip="${esc(ip)}"
+            data-dns="${esc(p.dnsName || "")}"
+            data-name="${esc(p.hostName)}"
+            ${ollama.reachable ? "" : "disabled"}
+          >Add as server</button>
+        </div>
+      </article>`;
+    })
+    .join("");
+}
+
+async function loadTailscale() {
+  try {
+    const data = await fetch("/api/tailscale").then((r) => r.json());
+    renderTailscale(data);
+  } catch (err) {
+    $("#ts-label").textContent = "error";
+    $("#ts-peers").innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
 async function load() {
   const r = await fetch("/api/servers");
   const data = await r.json();
   renderList(data.servers || []);
+  await loadTailscale();
 }
 
 $("#add-form").addEventListener("submit", async (e) => {
@@ -91,6 +165,39 @@ $("#add-form").addEventListener("submit", async (e) => {
     toast(err.message || "Add failed", false);
   } finally {
     btn.disabled = false;
+  }
+});
+
+document.body.addEventListener("click", async (e) => {
+  const addTs = e.target.closest("[data-ts-add]");
+  if (addTs) {
+    e.preventDefault();
+    const ip = addTs.getAttribute("data-ip");
+    const dns = addTs.getAttribute("data-dns");
+    const name = addTs.getAttribute("data-name");
+    addTs.disabled = true;
+    try {
+      const r = await fetch("/api/tailscale/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ip: ip || undefined,
+          dnsName: dns || undefined,
+          host: ip || dns,
+          name: name || undefined,
+          port: 11434,
+        }),
+      });
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || "Add failed");
+      toast(`Added ${data.server.name}`, true);
+      await load();
+    } catch (err) {
+      toast(err.message || "Add failed", false);
+    } finally {
+      addTs.disabled = false;
+    }
+    return;
   }
 });
 

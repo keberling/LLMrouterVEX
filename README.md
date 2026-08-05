@@ -10,6 +10,7 @@ Multi-server **Ollama** router for a small Ubuntu VM.
 - **OpenAI-compatible** API for apps: `POST /v1/chat/completions`
 - Ollama-compatible proxy: `POST /api/chat`
 - Lightweight: Node.js only, JSON on disk, no database server
+- **Tailscale** mesh: join the router, discover peers, add remote Ollama nodes by Tailscale IP / MagicDNS
 
 GitHub: [keberling/LLMrouterVEX](https://github.com/keberling/LLMrouterVEX)
 
@@ -27,60 +28,84 @@ This installs Node, the app, **systemd auto-start**, and configures **UFW**:
 
 - allows **SSH** (so you are not locked out)
 - allows **8080/tcp** for the dashboard + API
+- allows **Tailscale** interface / `100.64.0.0/10` to port 8080
 - default **deny incoming** / allow outgoing
 - enables UFW
 
 Optional flags via env:
 
 ```bash
-# Restrict dashboard/API to your LAN only (recommended)
+# Restrict dashboard/API to your LAN only (recommended on public clouds)
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh \
   | sudo LLMROUTER_ALLOW_FROM=192.168.1.0/24 bash
 
-# Also set an API bearer token for /v1 and /api/chat
+# Install + join Tailscale in one shot
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh \
-  | sudo LLMROUTER_ALLOW_FROM=192.168.1.0/24 LLMROUTER_API_TOKEN='change-me' bash
+  | sudo TS_AUTHKEY=tskey-auth-XXXX TS_HOSTNAME=llm-router bash
+
+# LAN restrict + API token + Tailscale
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh \
+  | sudo LLMROUTER_ALLOW_FROM=192.168.1.0/24 LLMROUTER_API_TOKEN='change-me' \
+      TS_AUTHKEY=tskey-auth-XXXX TS_HOSTNAME=llm-router bash
 ```
 
-Then open `http://<router-ip>:8080/`.
+Then open `http://<router-ip>:8080/` or `http://<tailscale-ip>:8080/`.
+
+---
+
+## One-line Tailscale join (router or GPU host)
+
+Create an auth key: https://login.tailscale.com/admin/settings/keys
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.sh \
+  | sudo TS_AUTHKEY=tskey-auth-XXXX TS_HOSTNAME=llm-router bash
+```
 
 ---
 
 ## One-line Ollama host setup (each GPU / LLM box)
 
-On **every machine running Ollama**, point it at the router VM IP and lock port 11434 to that router only:
+On **every machine running Ollama**, allow only the router (LAN **or Tailscale IP**):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- <ROUTER_IP>
 ```
 
-Example:
+Examples:
 
 ```bash
+# LAN router
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- 192.168.1.20
+
+# Tailscale router (recommended for remote boxes)
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/configure-ollama-host.sh | sudo bash -s -- 100.64.0.12
 ```
 
 That script will:
 
-1. Set `OLLAMA_HOST=0.0.0.0:11434` (LAN-reachable)
+1. Set `OLLAMA_HOST=0.0.0.0:11434`
 2. Restart Ollama
-3. Configure **UFW** so **only the router IP** can reach port **11434**
+3. Configure **UFW** so **only the router IP** can reach port **11434** (and tailnet helpers when the router IP is Tailscale)
 4. Keep SSH open
 
-Then on the router dashboard → **Servers** → add the Ollama host IP.
+Then on the router → **Servers**:
+
+- paste the worker **LAN IP**, **Tailscale IP**, or **MagicDNS** name, **or**
+- click **Add as server** on a discovered Tailscale peer that exposes Ollama
 
 ---
 
 ## Architecture
 
 ```
-Your apps  ──►  LLMrouterVEX (VM :8080)
+Your apps  ──►  LLMrouterVEX (VM :8080)  ── Tailscale mesh ──► remote Ollama
                     │
                     ├─ discover / health every 15s
                     │
-                    ├─► Ollama A  (192.168.x.10:11434)
-                    ├─► Ollama B  (192.168.x.11:11434)
-                    └─► Ollama C  ...
+                    ├─► Ollama A  (LAN 192.168.x.10:11434)
+                    ├─► Ollama B  (Tailscale 100.x.x.x:11434)
+                    └─► Ollama C  (gpu-box.tailnet.ts.net:11434)
 ```
 
 Use model name **`auto`** for intelligent routing, or a specific model name (e.g. `qwen3-vl:4b`) to load-balance across every healthy server that has it.

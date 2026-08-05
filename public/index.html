@@ -42,6 +42,20 @@
         </div>
       </div>
 
+      <section class="api-box" id="tailscale-box" style="margin-top:0;margin-bottom:22px">
+        <div class="section-title" style="margin:0 0 8px">
+          <h2 style="font-size:0.95rem">Tailscale</h2>
+          <span id="ts-state" class="muted small">Checking…</span>
+        </div>
+        <div class="kv"><span>This node</span><span class="mono" id="ts-self">—</span></div>
+        <div class="kv"><span>Tailscale IP</span><span class="mono" id="ts-ip">—</span></div>
+        <div class="kv"><span>Online peers</span><span class="mono" id="ts-peers">—</span></div>
+        <p class="help" id="ts-help" style="margin-top:10px">
+          Join with:
+          <code class="mono">curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-tailscale.sh | sudo TS_AUTHKEY=tskey-auth-XXXX bash</code>
+        </p>
+      </section>
+
       <div class="section-title">
         <h2>Ollama servers</h2>
         <span id="last-updated">Waiting for data…</span>
