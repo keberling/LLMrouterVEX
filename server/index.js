@@ -267,9 +267,8 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
   }
 
   const pick = decision.pick;
+  const pickInfo = discovery.describePick(pick);
   const abort = new AbortController();
-  // Only abort upstream if the *response* connection drops mid-flight
-  // (do not use req "close" — it fires after the body is read)
   const onResponseClose = () => {
     if (!res.writableFinished) {
       try {
@@ -281,9 +280,64 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
   };
   res.on("close", onResponseClose);
 
-  discovery.bumpActive(pick.serverId, 1);
+  let releaseSlot = null;
+  const id = `chatcmpl-${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+
+  const writeSseMeta = (obj) => {
+    if (res.writableEnded) return;
+    // OpenAI clients ignore unknown event names; our chat app can use them
+    res.write(`event: router\ndata: ${JSON.stringify(obj)}\n\n`);
+  };
 
   try {
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+      writeSseMeta({
+        type: "route",
+        model: pick.model,
+        server: pick.serverName,
+        serverId: pick.serverId,
+        reason: decision.reason,
+        modelLoaded: pickInfo.modelLoaded,
+        queue: pickInfo.queue,
+      });
+    }
+
+    releaseSlot = await discovery.acquireServerSlot(pick.serverId, {
+      signal: abort.signal,
+      onUpdate: (queue) => {
+        if (stream) {
+          writeSseMeta({
+            type: "queue",
+            model: pick.model,
+            server: pick.serverName,
+            queue,
+          });
+        }
+      },
+    });
+
+    if (stream) {
+      writeSseMeta({
+        type: "started",
+        model: pick.model,
+        server: pick.serverName,
+        modelLoaded: discovery.isModelLoaded(pick.serverId, pick.model),
+        queue: {
+          status: "generating",
+          position: 0,
+          ahead: 0,
+          message: discovery.isModelLoaded(pick.serverId, pick.model)
+            ? `Generating on ${pick.serverName}…`
+            : `Loading ${pick.model} on ${pick.serverName}…`,
+        },
+      });
+    }
+
     const ollamaRes = await proxyOllamaChat({
       baseUrl: pick.baseUrl,
       model: pick.model,
@@ -301,11 +355,7 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
       });
     }
 
-    const id = `chatcmpl-${randomUUID()}`;
-    const created = Math.floor(Date.now() / 1000);
-
     if (!stream) {
-      // Ollama non-stream response is a single JSON object
       const data = await ollamaRes.json();
       const content = data.message?.content || "";
       discovery.recordRequest(pick.serverId, {
@@ -323,21 +373,6 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
         )
       );
     }
-
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
-
-    // Router metadata as a comment line (non-breaking for most clients)
-    res.write(
-      `: router ${JSON.stringify({
-        model: pick.model,
-        server: pick.serverName,
-        serverId: pick.serverId,
-        reason: decision.reason,
-      })}\n\n`
-    );
 
     const reader = ollamaRes.body.getReader();
     const decoder = new TextDecoder();
@@ -387,7 +422,13 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
     }
   } finally {
     res.off?.("close", onResponseClose);
-    discovery.bumpActive(pick.serverId, -1);
+    if (typeof releaseSlot === "function") {
+      try {
+        releaseSlot();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 });
 
@@ -409,6 +450,7 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
     return res.status(decision.status || 503).json({ error: decision.error });
   }
   const pick = decision.pick;
+  const pickInfo = discovery.describePick(pick);
 
   const abort = new AbortController();
   const onResponseClose = () => {
@@ -422,8 +464,62 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
   };
   res.on("close", onResponseClose);
 
-  discovery.bumpActive(pick.serverId, 1);
+  let releaseSlot = null;
+  const writeMeta = (obj) => {
+    if (res.writableEnded) return;
+    try {
+      res.write(JSON.stringify({ router: true, ...obj }) + "\n");
+    } catch {
+      /* ignore */
+    }
+  };
+
   try {
+    // Stream meta events before waiting on Ollama so clients see queue state
+    if (stream) {
+      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("X-Router-Model", pick.model);
+      res.setHeader("X-Router-Server", pick.serverName);
+      res.flushHeaders?.();
+
+      writeMeta({
+        type: "route",
+        model: pick.model,
+        server: pick.serverName,
+        serverId: pick.serverId,
+        reason: decision.reason,
+        modelLoaded: pickInfo.modelLoaded,
+        queue: pickInfo.queue,
+      });
+    }
+
+    releaseSlot = await discovery.acquireServerSlot(pick.serverId, {
+      signal: abort.signal,
+      onUpdate: (queue) => {
+        if (stream) writeMeta({ type: "queue", queue, model: pick.model, server: pick.serverName });
+      },
+    });
+
+    if (stream) {
+      writeMeta({
+        type: "started",
+        model: pick.model,
+        server: pick.serverName,
+        modelLoaded: discovery.isModelLoaded(pick.serverId, pick.model),
+        queue: {
+          status: "generating",
+          position: 0,
+          ahead: 0,
+          active: discovery.getQueueDepth(pick.serverId).active,
+          waiting: discovery.getQueueDepth(pick.serverId).waiting,
+          message: discovery.isModelLoaded(pick.serverId, pick.model)
+            ? `Generating on ${pick.serverName}…`
+            : `Loading ${pick.model} on ${pick.serverName}…`,
+        },
+      });
+    }
+
     const ollamaRes = await proxyOllamaChat({
       baseUrl: pick.baseUrl,
       model: pick.model,
@@ -436,17 +532,15 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
     if (!ollamaRes.ok) {
       const text = await ollamaRes.text();
       discovery.recordRequest(pick.serverId, { ok: false });
+      if (stream && !res.writableEnded) {
+        writeMeta({ type: "error", error: text || "Upstream Ollama error" });
+        res.end();
+        return;
+      }
       return res.status(ollamaRes.status).json({ error: text });
     }
 
-    // Inject route info as first SSE-style meta for our dashboard clients
     if (stream) {
-      res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("X-Router-Model", pick.model);
-      res.setHeader("X-Router-Server", pick.serverName);
-      res.flushHeaders?.();
-
       const reader = ollamaRes.body.getReader();
       const decoder = new TextDecoder();
       let evalCount = 0;
@@ -455,7 +549,6 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
         if (done) break;
         if (abort.signal.aborted) break;
         const text = decoder.decode(value, { stream: true });
-        // track tokens if present
         for (const line of text.split("\n")) {
           if (!line.trim()) continue;
           try {
@@ -475,18 +568,38 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
         ok: true,
         tokensOut: data.eval_count || 0,
       });
-      res.json(data);
+      res.json({
+        ...data,
+        router: {
+          model: pick.model,
+          server: pick.serverName,
+          reason: decision.reason,
+          modelLoaded: pickInfo.modelLoaded,
+        },
+      });
     }
   } catch (err) {
     discovery.recordRequest(pick.serverId, { ok: false });
-    if (!res.headersSent) {
+    if (err?.name === "AbortError") {
+      if (stream && res.headersSent && !res.writableEnded) {
+        writeMeta({ type: "end", stopped: true });
+        res.end();
+      }
+    } else if (!res.headersSent) {
       res.status(502).json({ error: err.message || "Proxy failed" });
     } else {
+      writeMeta({ type: "error", error: err.message || "Proxy failed" });
       res.end();
     }
   } finally {
     res.off?.("close", onResponseClose);
-    discovery.bumpActive(pick.serverId, -1);
+    if (typeof releaseSlot === "function") {
+      try {
+        releaseSlot();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 });
 

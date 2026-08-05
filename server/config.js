@@ -14,7 +14,13 @@ module.exports = {
   PROBE_TIMEOUT_MS: Number(process.env.PROBE_TIMEOUT_MS || 4000),
   /** Default Ollama API port when only IP is provided */
   DEFAULT_OLLAMA_PORT: Number(process.env.DEFAULT_OLLAMA_PORT || 11434),
-  /** Max concurrent proxy generations tracked for load balancing */
+  /**
+   * Max concurrent generations per backend server.
+   * Extra requests wait in a FIFO queue and receive queue-position events.
+   */
+  MAX_CONCURRENT_PER_SERVER: Number(
+    process.env.LLMROUTER_MAX_CONCURRENT_PER_SERVER || 1
+  ),
   /** Optional bearer token for /v1 and /api proxy (leave empty to disable) */
   API_TOKEN: process.env.LLMROUTER_API_TOKEN || "",
   STORE_FILE: path.join(DATA_DIR, "servers.json"),

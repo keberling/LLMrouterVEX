@@ -1,4 +1,4 @@
-const { PROBE_TIMEOUT_MS } = require("./config");
+const { PROBE_TIMEOUT_MS, MAX_CONCURRENT_PER_SERVER } = require("./config");
 const { profileModel } = require("./modelRouter");
 
 /**
@@ -9,6 +9,181 @@ const runtime = new Map();
 
 /** active generation counts per serverId */
 const activeByServer = new Map();
+
+/**
+ * Per-server FIFO slot queues.
+ * Map<serverId, { active: number, max: number, waiters: Array }>
+ */
+const serverQueues = new Map();
+
+function getQueue(serverId) {
+  let q = serverQueues.get(serverId);
+  if (!q) {
+    q = {
+      active: 0,
+      max: MAX_CONCURRENT_PER_SERVER,
+      waiters: [],
+    };
+    serverQueues.set(serverId, q);
+  }
+  return q;
+}
+
+function queueSnapshot(serverId) {
+  const q = getQueue(serverId);
+  const rt = runtime.get(serverId);
+  return {
+    serverId,
+    serverName: rt?.name || serverId,
+    active: q.active,
+    waiting: q.waiters.length,
+    maxConcurrent: q.max,
+    /** 0 = running / about to run; 1+ = place in line (1 = next) */
+    // position filled by callers for a specific waiter
+  };
+}
+
+function notifyWaiters(serverId) {
+  const q = getQueue(serverId);
+  const base = queueSnapshot(serverId);
+  q.waiters.forEach((w, idx) => {
+    if (typeof w.onUpdate === "function") {
+      try {
+        w.onUpdate({
+          ...base,
+          status: "waiting",
+          position: idx + 1,
+          ahead: idx,
+          message:
+            idx === 0
+              ? `Next in line on ${base.serverName}…`
+              : `Queued on ${base.serverName} — ${idx} ahead of you`,
+        });
+      } catch {
+        /* ignore listener errors */
+      }
+    }
+  });
+}
+
+function pumpQueue(serverId) {
+  const q = getQueue(serverId);
+  while (q.active < q.max && q.waiters.length > 0) {
+    const next = q.waiters.shift();
+    q.active += 1;
+    activeByServer.set(serverId, q.active);
+    const rt = runtime.get(serverId);
+    if (rt?.load) rt.load.activeGenerations = q.active;
+
+    const release = () => {
+      q.active = Math.max(0, q.active - 1);
+      activeByServer.set(serverId, q.active);
+      if (rt?.load) rt.load.activeGenerations = q.active;
+      pumpQueue(serverId);
+      notifyWaiters(serverId);
+    };
+
+    try {
+      next.resolve(release);
+    } catch {
+      release();
+    }
+  }
+  notifyWaiters(serverId);
+}
+
+/**
+ * Wait for a concurrency slot on a backend server.
+ * @param {string} serverId
+ * @param {{ signal?: AbortSignal, onUpdate?: (snap)=>void }} opts
+ * @returns {Promise<() => void>} release function
+ */
+function acquireServerSlot(serverId, opts = {}) {
+  const { signal, onUpdate } = opts;
+  const q = getQueue(serverId);
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+      return;
+    }
+
+    const entry = {
+      resolve,
+      reject,
+      onUpdate,
+    };
+
+    const onAbort = () => {
+      const idx = q.waiters.indexOf(entry);
+      if (idx >= 0) {
+        q.waiters.splice(idx, 1);
+        notifyWaiters(serverId);
+      }
+      reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+    };
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    // Immediate start if capacity free
+    if (q.active < q.max && q.waiters.length === 0) {
+      q.active += 1;
+      activeByServer.set(serverId, q.active);
+      const rt = runtime.get(serverId);
+      if (rt?.load) rt.load.activeGenerations = q.active;
+
+      if (typeof onUpdate === "function") {
+        onUpdate({
+          ...queueSnapshot(serverId),
+          status: "starting",
+          position: 0,
+          ahead: 0,
+          message: `Starting on ${rt?.name || "server"}…`,
+        });
+      }
+
+      const release = () => {
+        q.active = Math.max(0, q.active - 1);
+        activeByServer.set(serverId, q.active);
+        if (rt?.load) rt.load.activeGenerations = q.active;
+        if (signal) signal.removeEventListener("abort", onAbort);
+        pumpQueue(serverId);
+      };
+      resolve(release);
+      return;
+    }
+
+    // Must wait
+    q.waiters.push(entry);
+    notifyWaiters(serverId);
+    // entry.resolve is called from pumpQueue with release fn
+    const origResolve = entry.resolve;
+    entry.resolve = (release) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (typeof onUpdate === "function") {
+        onUpdate({
+          ...queueSnapshot(serverId),
+          status: "starting",
+          position: 0,
+          ahead: 0,
+          message: `Your turn — starting on ${queueSnapshot(serverId).serverName}…`,
+        });
+      }
+      origResolve(release);
+    };
+  });
+}
+
+function getQueueDepth(serverId) {
+  const q = getQueue(serverId);
+  return {
+    active: q.active,
+    waiting: q.waiters.length,
+    maxConcurrent: q.max,
+  };
+}
 
 function emptyRuntime(server) {
   return {
@@ -53,6 +228,36 @@ function ensureRuntime(server) {
 function removeRuntime(serverId) {
   runtime.delete(serverId);
   activeByServer.delete(serverId);
+  serverQueues.delete(serverId);
+}
+
+function isModelLoaded(serverId, modelName) {
+  const rt = runtime.get(serverId);
+  if (!rt) return false;
+  return (rt.loaded || []).some((m) => m.name === modelName);
+}
+
+function describePick(pick) {
+  const depth = getQueueDepth(pick.serverId);
+  const loaded = isModelLoaded(pick.serverId, pick.model);
+  const willQueue = depth.active >= depth.maxConcurrent;
+  return {
+    serverId: pick.serverId,
+    serverName: pick.serverName,
+    baseUrl: pick.baseUrl,
+    model: pick.model,
+    modelLoaded: loaded,
+    willQueue,
+    queue: {
+      ...depth,
+      status: willQueue ? "waiting" : "starting",
+      position: willQueue ? depth.waiting + 1 : 0,
+      ahead: willQueue ? depth.waiting : 0,
+      message: willQueue
+        ? `Queued on ${pick.serverName} — ${depth.waiting} ahead · ${pick.model}${loaded ? " (in VRAM)" : " (cold load)"}`
+        : `${loaded ? "Using" : "Loading"} ${pick.model} on ${pick.serverName}…`,
+    },
+  };
 }
 
 async function fetchJson(url, timeoutMs = PROBE_TIMEOUT_MS) {
@@ -299,4 +504,9 @@ module.exports = {
   catalogSummary,
   formatBytes,
   activeByServer,
+  acquireServerSlot,
+  getQueueDepth,
+  isModelLoaded,
+  describePick,
+  queueSnapshot,
 };
