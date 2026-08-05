@@ -393,19 +393,36 @@ LLMrouterVEX/
 
 ---
 
-## Updating
+## Updating the Ubuntu router VM
+
+**One-liner (recommended):** re-runs install (pulls latest `main`, `npm install`, restarts service, refreshes UFW):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install.sh | sudo bash
+```
+
+**Or manual:**
 
 ```bash
 cd /opt/llmroutervex
-sudo -u llmrouter git pull
-sudo -u llmrouter npm install --omit=dev
+sudo git fetch origin main
+sudo git reset --hard origin/main
+sudo npm install --omit=dev
 sudo systemctl restart llmrouter
+sudo systemctl status llmrouter --no-pager
 ```
 
-Or re-run `sudo bash deploy/install.sh`.
+Logs:
+
+```bash
+sudo journalctl -u llmrouter -f
+```
+
+Your registered servers in `/var/lib/llmroutervex` are **kept** across updates.
 
 ---
 
 ## License
 
 MIT
+

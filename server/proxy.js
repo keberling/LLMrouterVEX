@@ -1,5 +1,6 @@
 const {
   route,
+  pickBalancedServer,
   latestUserText,
   messagesHaveImages,
   profileModel,
@@ -58,7 +59,7 @@ function pickRoute({ messages, model, think }) {
   const hasImages = messagesHaveImages(messages);
   const candidates = discovery.buildCandidates();
 
-  // Explicit model name: load-balance across servers that have it
+  // Explicit model name: equalize across every healthy host that has it
   if (model && model !== "auto") {
     const matches = candidates.filter(
       (c) => c.profile.name === model || c.profile.name.startsWith(model + ":")
@@ -69,13 +70,17 @@ function pickRoute({ messages, model, think }) {
         status: 404,
       };
     }
-    matches.sort(
-      (a, b) =>
-        (a.active || 0) - (b.active || 0) ||
-        (Number(b.loaded) - Number(a.loaded)) ||
-        (a.latencyMs || 9999) - (b.latencyMs || 9999)
-    );
-    const w = matches[0];
+    const modelName = matches[0].profile.name;
+    // Prefer exact name matches when several tags exist
+    const exact = matches.filter((c) => c.profile.name === model);
+    const pool = exact.length ? exact : matches;
+    const w = pickBalancedServer(pool, modelName) || pool[0];
+    const dist = pool
+      .map(
+        (c) =>
+          `${c.serverName}:${c.totalRequests ?? 0}req/${c.active || 0}act`
+      )
+      .join(", ");
     return {
       pick: {
         serverId: w.serverId,
@@ -84,9 +89,9 @@ function pickRoute({ messages, model, think }) {
         model: w.profile.name,
         score: w.score,
       },
-      reason: `Explicit model ${w.profile.name} @ ${w.serverName} (load-balanced)`,
+      reason: `Explicit ${w.profile.name} @ ${w.serverName} · equal-LB [${dist}]`,
       classification: null,
-      ranked: matches.slice(0, 8),
+      ranked: pool.slice(0, 8),
     };
   }
 

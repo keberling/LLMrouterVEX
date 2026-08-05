@@ -225,6 +225,7 @@ function buildCandidates() {
     if (!rt.enabled || !rt.healthy) continue;
     const loadedNames = new Set((rt.loaded || []).map((m) => m.name));
     const active = activeByServer.get(rt.id) || 0;
+    const totalRequests = rt.stats?.requests || 0;
     for (const m of rt.models || []) {
       out.push({
         serverId: rt.id,
@@ -233,6 +234,8 @@ function buildCandidates() {
         profile: m.profile || profileModel(m),
         loaded: loadedNames.has(m.name),
         active,
+        totalRequests,
+        statsRequests: totalRequests,
         latencyMs: rt.latencyMs,
         healthy: true,
         weight: 1,

@@ -221,24 +221,114 @@ function scoreCandidate(candidate, classification) {
     }
   }
 
-  // Prefer already-loaded model on that server (avoids VRAM thrash)
+  // Mild preference for already-loaded weights (do NOT dominate LB)
   if (loaded) {
-    score += 26;
+    score += 4;
     reasons.push("already loaded");
   }
 
-  // Load balance: fewer active generations preferred
-  score -= Math.min(40, (active || 0) * 12);
+  // Soft load signals (hard equalizing happens after model pick)
+  score -= Math.min(24, (active || 0) * 8);
   if (active > 0) reasons.push(`active:${active}`);
 
-  // Prefer lower latency servers
+  // Tiny latency nudge only (never starve a healthy peer)
   if (latencyMs != null && latencyMs > 0) {
-    if (latencyMs < 80) score += 10;
-    else if (latencyMs < 200) score += 4;
-    else if (latencyMs > 800) score -= 15;
+    if (latencyMs > 1500) score -= 8;
+    else if (latencyMs > 800) score -= 3;
   }
 
   return { score, reasons };
+}
+
+/** Round-robin counters per model name (in-process) */
+const rrByModel = new Map();
+
+function nextRr(modelName) {
+  const n = (rrByModel.get(modelName) || 0) + 1;
+  rrByModel.set(modelName, n);
+  return n;
+}
+
+/**
+ * Among candidates for the same chosen model, pick the server that has
+ * received the fewest completed requests (then fewest active, then RR).
+ */
+function pickBalancedServer(pool, modelName) {
+  if (!pool.length) return null;
+  if (pool.length === 1) return pool[0];
+
+  const rr = nextRr(modelName);
+  const sorted = [...pool].sort((a, b) => {
+    const aReq = a.totalRequests ?? a.statsRequests ?? 0;
+    const bReq = b.totalRequests ?? b.statsRequests ?? 0;
+    const aAct = a.active || 0;
+    const bAct = b.active || 0;
+    // Equalize completed request counts first
+    if (aReq !== bReq) return aReq - bReq;
+    // Then prefer fewer in-flight generations
+    if (aAct !== bAct) return aAct - bAct;
+    // Stable-ish rotation when fully tied
+    const aKey = String(a.serverId || "");
+    const bKey = String(b.serverId || "");
+    if (aKey === bKey) return 0;
+    // Rotate starting index by rr among sorted-by-id order
+    return aKey < bKey ? -1 : 1;
+  });
+
+  // When top two are tied on requests+active, rotate
+  const top = sorted[0];
+  const tied = sorted.filter(
+    (c) =>
+      (c.totalRequests ?? c.statsRequests ?? 0) ===
+        (top.totalRequests ?? top.statsRequests ?? 0) &&
+      (c.active || 0) === (top.active || 0)
+  );
+  if (tied.length > 1) {
+    return tied[rr % tied.length];
+  }
+  return top;
+}
+
+/**
+ * After model-quality scoring, choose model then load-balance hosts.
+ */
+function selectCandidate(scoredList) {
+  if (!scoredList?.length) return null;
+
+  const ordered = [...scoredList].sort(
+    (a, b) =>
+      b.score - a.score ||
+      (a.profile.paramsB || 99) - (b.profile.paramsB || 99)
+  );
+
+  const best = ordered[0];
+  const modelName = best.profile.name;
+
+  // Pool: every healthy server offering that same model, within a small
+  // quality band of the best score for that model on that host.
+  // (Usually all identical models score the same.)
+  const SCORE_BAND = 12;
+  const pool = ordered.filter(
+    (c) =>
+      c.healthy !== false &&
+      c.profile.name === modelName &&
+      c.score >= best.score - SCORE_BAND
+  );
+
+  const winner = pickBalancedServer(pool.length ? pool : [best], modelName);
+  if (winner && pool.length > 1) {
+    const reqs = pool
+      .map(
+        (c) =>
+          `${c.serverName}:${c.totalRequests ?? c.statsRequests ?? 0}req/${c.active || 0}act`
+      )
+      .join(", ");
+    winner.reasons = [
+      ...(winner.reasons || []),
+      `lb[${pool.length} hosts: ${reqs}]`,
+    ];
+  }
+  return winner;
 }
 
 /**
@@ -273,10 +363,20 @@ function route(promptText, candidates, options = {}) {
     (a, b) =>
       b.score - a.score ||
       (a.profile.paramsB || 99) - (b.profile.paramsB || 99) ||
+      (a.totalRequests ?? 0) - (b.totalRequests ?? 0) ||
       (a.active || 0) - (b.active || 0)
   );
 
-  const winner = list[0];
+  const winner = selectCandidate(list);
+  if (!winner) {
+    return {
+      pick: null,
+      reason: "No route available",
+      classification,
+      ranked: list.slice(0, 12),
+    };
+  }
+
   if (options.hasImages && !isVision(winner.profile)) {
     return {
       pick: null,
@@ -287,7 +387,7 @@ function route(promptText, candidates, options = {}) {
   }
 
   const intentLabel = classification.intents.join(", ");
-  const topReasons = [...new Set(winner.reasons)].slice(0, 4).join("; ");
+  const topReasons = [...new Set(winner.reasons)].slice(0, 5).join("; ");
   const reason = `Intent: ${intentLabel} (${classification.complexity}) → ${winner.profile.name} @ ${winner.serverName} — ${topReasons}`;
 
   return {
@@ -338,6 +438,8 @@ module.exports = {
   profileModel,
   classifyPrompt,
   route,
+  selectCandidate,
+  pickBalancedServer,
   latestUserText,
   messagesHaveImages,
   isVision,
