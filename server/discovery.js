@@ -1,4 +1,8 @@
-const { PROBE_TIMEOUT_MS, MAX_CONCURRENT_PER_SERVER } = require("./config");
+const {
+  PROBE_TIMEOUT_MS,
+  MAX_CONCURRENT_PER_SERVER,
+  SESSION_STICKY_TTL_MS,
+} = require("./config");
 const { profileModel } = require("./modelRouter");
 
 /**
@@ -15,6 +19,51 @@ const activeByServer = new Map();
  * Map<serverId, { active: number, max: number, waiters: Array }>
  */
 const serverQueues = new Map();
+
+/**
+ * Session affinity for coding clients (IDE multi-turn).
+ * Map<sessionId, { serverId, model, at }>
+ */
+const sessionAffinity = new Map();
+
+function pruneSessionAffinity() {
+  const now = Date.now();
+  const ttl = SESSION_STICKY_TTL_MS || 30 * 60 * 1000;
+  for (const [id, entry] of sessionAffinity) {
+    if (!entry || now - entry.at > ttl) sessionAffinity.delete(id);
+  }
+}
+
+/**
+ * @param {string|null|undefined} sessionId
+ * @returns {{ serverId: string, model: string, at: number } | null}
+ */
+function getSessionAffinity(sessionId) {
+  if (!sessionId || typeof sessionId !== "string") return null;
+  const key = sessionId.trim().slice(0, 128);
+  if (!key) return null;
+  pruneSessionAffinity();
+  const entry = sessionAffinity.get(key);
+  if (!entry) return null;
+  // Touch TTL on read so active IDE sessions stay sticky
+  entry.at = Date.now();
+  return entry;
+}
+
+/**
+ * Remember which backend served this session (for next turn stickiness).
+ */
+function rememberSession(sessionId, serverId, model) {
+  if (!sessionId || !serverId) return;
+  const key = String(sessionId).trim().slice(0, 128);
+  if (!key) return;
+  pruneSessionAffinity();
+  sessionAffinity.set(key, {
+    serverId,
+    model: model || null,
+    at: Date.now(),
+  });
+}
 
 function getQueue(serverId) {
   let q = serverQueues.get(serverId);
@@ -509,4 +558,6 @@ module.exports = {
   isModelLoaded,
   describePick,
   queueSnapshot,
+  getSessionAffinity,
+  rememberSession,
 };

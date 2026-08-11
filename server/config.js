@@ -21,6 +21,32 @@ module.exports = {
   MAX_CONCURRENT_PER_SERVER: Number(
     process.env.LLMROUTER_MAX_CONCURRENT_PER_SERVER || 1
   ),
+  /**
+   * How long Ollama keeps a model in VRAM after a request.
+   * Ollama formats: "30m", "1h", number of seconds, or "-1" (stay loaded).
+   * Empty string = let Ollama default (usually ~5m).
+   */
+  KEEP_ALIVE:
+    process.env.LLMROUTER_KEEP_ALIVE !== undefined
+      ? process.env.LLMROUTER_KEEP_ALIVE
+      : "30m",
+  /**
+   * Default context window if the client does not send options.num_ctx.
+   * 0 / empty = do not inject (use model/Ollama default).
+   */
+  DEFAULT_NUM_CTX: Number(process.env.LLMROUTER_DEFAULT_NUM_CTX || 0) || 0,
+  /**
+   * Optional system preamble prepended when the request has no system message.
+   * Useful as an org-wide coding default; prefer IDE project rules for repos.
+   */
+  SYSTEM_PREAMBLE: process.env.LLMROUTER_SYSTEM_PREAMBLE || "",
+  /**
+   * How long session sticky affinity lives (ms) after last use.
+   * Clients send header X-LLM-Session (or body.session_id).
+   */
+  SESSION_STICKY_TTL_MS: Number(
+    process.env.LLMROUTER_SESSION_STICKY_TTL_MS || 30 * 60 * 1000
+  ),
   /** Optional bearer token for /v1 and /api proxy (leave empty to disable) */
   API_TOKEN: process.env.LLMROUTER_API_TOKEN || "",
   STORE_FILE: path.join(DATA_DIR, "servers.json"),

@@ -265,9 +265,22 @@ function reqCount(c) {
  *  3) Only cold-start on another host if nobody has it loaded, or all loaded
  *     hosts are saturated (active >= MAX_ACTIVE_BEFORE_COLD_SPILL)
  */
-function pickBalancedServer(pool, modelName) {
+function pickBalancedServer(pool, modelName, opts = {}) {
   if (!pool.length) return null;
   if (pool.length === 1) return pool[0];
+
+  const preferredServerId = opts.preferredServerId || null;
+  if (preferredServerId) {
+    const sticky = pool.find((c) => c.serverId === preferredServerId);
+    // Stick to the session host when it is not saturated (helps KV-cache / warm VRAM)
+    if (sticky && (sticky.active || 0) < MAX_ACTIVE_BEFORE_COLD_SPILL) {
+      sticky.reasons = [
+        ...(sticky.reasons || []),
+        `lb:session-sticky@${sticky.serverName}${sticky.loaded ? "*" : ""}`,
+      ];
+      return sticky;
+    }
+  }
 
   const loaded = pool.filter((c) => c.loaded);
   const cold = pool.filter((c) => !c.loaded);
@@ -336,8 +349,10 @@ function pickBalancedServer(pool, modelName) {
 
 /**
  * After model-quality scoring, choose model then load-balance hosts.
+ * @param {Array} scoredList
+ * @param {{ preferredServerId?: string }} opts
  */
-function selectCandidate(scoredList) {
+function selectCandidate(scoredList, opts = {}) {
   if (!scoredList?.length) return null;
 
   const ordered = [...scoredList].sort(
@@ -358,13 +373,13 @@ function selectCandidate(scoredList) {
       c.score >= best.score - SCORE_BAND
   );
 
-  return pickBalancedServer(pool.length ? pool : [best], modelName);
+  return pickBalancedServer(pool.length ? pool : [best], modelName, opts);
 }
 
 /**
  * @param {string} promptText
  * @param {Array} candidates - list of { serverId, serverName, baseUrl, profile, loaded, active, latencyMs, healthy, weight }
- * @param {{ hasImages?: boolean, think?: boolean }} options
+ * @param {{ hasImages?: boolean, think?: boolean, preferredServerId?: string }} options
  */
 function route(promptText, candidates, options = {}) {
   const classification = classifyPrompt(promptText, options);
@@ -397,7 +412,9 @@ function route(promptText, candidates, options = {}) {
       (a.active || 0) - (b.active || 0)
   );
 
-  const winner = selectCandidate(list);
+  const winner = selectCandidate(list, {
+    preferredServerId: options.preferredServerId,
+  });
   if (!winner) {
     return {
       pick: null,

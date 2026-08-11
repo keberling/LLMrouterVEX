@@ -6,6 +6,7 @@ const {
   profileModel,
 } = require("./modelRouter");
 const discovery = require("./discovery");
+const config = require("./config");
 
 function toOllamaBase64(img) {
   if (!img) return null;
@@ -54,10 +55,11 @@ function openaiToOllamaMessages(messages) {
   });
 }
 
-function pickRoute({ messages, model, think }) {
+function pickRoute({ messages, model, think, preferredServerId }) {
   const prompt = latestUserText(messages);
   const hasImages = messagesHaveImages(messages);
   const candidates = discovery.buildCandidates();
+  const stickyOpts = preferredServerId ? { preferredServerId } : {};
 
   // Explicit model name: equalize across every healthy host that has it
   if (model && model !== "auto") {
@@ -74,7 +76,8 @@ function pickRoute({ messages, model, think }) {
     const exact = matches.filter((c) => c.profile.name === model);
     const pool = exact.length ? exact : matches;
     const modelName = pool[0].profile.name;
-    const w = pickBalancedServer(pool, modelName) || pool[0];
+    const w =
+      pickBalancedServer(pool, modelName, stickyOpts) || pool[0];
     return {
       pick: {
         serverId: w.serverId,
@@ -89,7 +92,11 @@ function pickRoute({ messages, model, think }) {
     };
   }
 
-  const result = route(prompt, candidates, { hasImages, think: Boolean(think) });
+  const result = route(prompt, candidates, {
+    hasImages,
+    think: Boolean(think),
+    preferredServerId,
+  });
   if (!result.pick) {
     return {
       error: result.reason || "No route available",
@@ -102,6 +109,73 @@ function pickRoute({ messages, model, think }) {
 }
 
 /**
+ * Map OpenAI-style body fields + Ollama options into Ollama /api/chat options.
+ */
+function buildOllamaOptions(body = {}) {
+  const opts = {};
+  if (body.options && typeof body.options === "object") {
+    Object.assign(opts, body.options);
+  }
+  // OpenAI-compatible aliases
+  if (body.temperature != null && opts.temperature == null) {
+    opts.temperature = body.temperature;
+  }
+  if (body.top_p != null && opts.top_p == null) {
+    opts.top_p = body.top_p;
+  }
+  if (body.max_tokens != null && opts.num_predict == null) {
+    opts.num_predict = body.max_tokens;
+  }
+  if (body.stop != null && opts.stop == null) {
+    opts.stop = body.stop;
+  }
+  if (body.seed != null && opts.seed == null) {
+    opts.seed = body.seed;
+  }
+  // Router default context for coding (only if client omitted num_ctx)
+  if (
+    opts.num_ctx == null &&
+    config.DEFAULT_NUM_CTX &&
+    Number(config.DEFAULT_NUM_CTX) > 0
+  ) {
+    opts.num_ctx = Number(config.DEFAULT_NUM_CTX);
+  }
+  return Object.keys(opts).length ? opts : undefined;
+}
+
+/**
+ * Resolve keep_alive: request body wins, else router env default.
+ * Empty string means "omit / Ollama default".
+ */
+function resolveKeepAlive(body = {}) {
+  if (body.keep_alive !== undefined && body.keep_alive !== null) {
+    return body.keep_alive;
+  }
+  if (config.KEEP_ALIVE === "" || config.KEEP_ALIVE === undefined) {
+    return undefined;
+  }
+  // Numeric string → number for Ollama (seconds)
+  const ka = config.KEEP_ALIVE;
+  if (typeof ka === "string" && /^-?\d+$/.test(ka.trim())) {
+    return Number(ka.trim());
+  }
+  return ka;
+}
+
+/**
+ * Prepend org-wide coding system preamble when the client sent none.
+ */
+function applySystemPreamble(messages) {
+  const preamble = (config.SYSTEM_PREAMBLE || "").trim();
+  if (!preamble || !Array.isArray(messages) || !messages.length) {
+    return messages;
+  }
+  const hasSystem = messages.some((m) => m.role === "system");
+  if (hasSystem) return messages;
+  return [{ role: "system", content: preamble }, ...messages];
+}
+
+/**
  * Stream Ollama /api/chat and pipe as SSE-ish NDJSON or OpenAI SSE.
  */
 async function proxyOllamaChat({
@@ -111,18 +185,27 @@ async function proxyOllamaChat({
   think = false,
   stream = true,
   signal,
+  keep_alive,
+  options,
 }) {
   const url = `${baseUrl.replace(/\/$/, "")}/api/chat`;
+  const payload = {
+    model,
+    messages,
+    stream,
+    think,
+  };
+  if (keep_alive !== undefined && keep_alive !== null && keep_alive !== "") {
+    payload.keep_alive = keep_alive;
+  }
+  if (options && typeof options === "object" && Object.keys(options).length) {
+    payload.options = options;
+  }
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
-    body: JSON.stringify({
-      model,
-      messages,
-      stream,
-      think,
-    }),
+    body: JSON.stringify(payload),
   });
   return res;
 }
@@ -200,4 +283,7 @@ module.exports = {
   ollamaDoneToOpenAI,
   toOllamaBase64,
   profileModel,
+  buildOllamaOptions,
+  resolveKeepAlive,
+  applySystemPreamble,
 };

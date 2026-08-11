@@ -234,6 +234,12 @@ Environment=HOST=0.0.0.0
 Environment=LLMROUTER_DATA=/var/lib/llmroutervex
 Environment=DISCOVERY_INTERVAL_MS=15000
 Environment=LLMROUTER_API_TOKEN=super-secret
+# Keep coding models warm in VRAM (Ollama keep_alive). Use -1 to never unload.
+Environment=LLMROUTER_KEEP_ALIVE=30m
+# Optional default context if client omits options.num_ctx (0 = off)
+# Environment=LLMROUTER_DEFAULT_NUM_CTX=32768
+# Optional org-wide system prompt when the client sends no system message
+# Environment=LLMROUTER_SYSTEM_PREAMBLE=You are a careful coding assistant.
 ```
 
 ```bash
@@ -321,11 +327,71 @@ print(resp.choices[0].message.content)
 { "model": "qwen3:14b", "messages": [...] }
 ```
 
-Traffic is load-balanced across every healthy server that has that model (prefers fewer active jobs + already-loaded weights).
+Traffic is load-balanced across every healthy server that has that model (prefers fewer active jobs + already-loaded weights + optional session stickiness).
 
 ### Images (vision)
 
 Send OpenAI-style image parts, or Ollama-style `images: ["<base64>"]` via `/api/chat`. Router will only pick vision-capable models.
+
+---
+
+## Coding IDEs (Continue, Cursor-compatible, Cline, …)
+
+Point the client’s **OpenAI-compatible base URL** at the router:
+
+| Setting | Value |
+|---------|--------|
+| Base URL | `http://100.69.34.12:8080/v1` (your Tailscale / LAN router IP) |
+| API key | any string, or `LLMROUTER_API_TOKEN` if you set one |
+| Model | a real Ollama name (e.g. `qwen2.5-coder:14b`) or `auto` |
+
+### What “memory” means (important)
+
+Local models **do not store long-term memory inside weights**. Memory works as:
+
+| Kind | Who owns it | How |
+|------|-------------|-----|
+| **Chat turns** | **Your IDE** | Plugin resends `messages[]` every request. Router is stateless. |
+| **Project / codebase** | **Your IDE** | Rules files, `@codebase`, open-file context. Prefer this for coding. |
+| **Warm model in VRAM** | **Router + Ollama** | Default `keep_alive=30m` (override with `LLMROUTER_KEEP_ALIVE` or body `keep_alive`). |
+| **Same GPU for a thread** | **Router** | Send header `X-LLM-Session: <stable-id>` so multi-turn sticks to one host (better for warm VRAM / cache). |
+
+Example with session stickiness + longer keep-alive:
+
+```bash
+curl http://ROUTER:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-LLM-Session: my-ide-chat-42' \
+  -d '{
+    "model": "qwen2.5-coder:14b",
+    "keep_alive": "1h",
+    "options": { "num_ctx": 32768 },
+    "messages": [
+      {"role":"system","content":"You are a coding assistant for this repo."},
+      {"role":"user","content":"Explain the auth middleware."}
+    ]
+  }'
+```
+
+Passthrough to Ollama:
+
+- `keep_alive` (body or env default)
+- `options` (`num_ctx`, `temperature`, …)
+- OpenAI fields mapped: `temperature`, `top_p`, `max_tokens` → `num_predict`, `stop`, `seed`
+
+**Continue.dev sketch** (`~/.continue/config.json` / config.yaml): use provider OpenAI, `apiBase` → `http://ROUTER:8080/v1`, model name matching a pulled Ollama tag. Put repo rules under Continue rules / docs so project memory stays in the IDE.
+
+**Cursor:** use a custom OpenAI-compatible endpoint where supported; keep **project rules** and Cursor’s own index for codebase memory (the router will not index your repo).
+
+### Optional router-wide coding preamble
+
+If you want every client that omits a system message to get the same default:
+
+```ini
+Environment=LLMROUTER_SYSTEM_PREAMBLE=You are a careful senior engineer. Prefer small diffs and explain tradeoffs briefly.
+```
+
+Prefer **per-project IDE rules** over a global preamble when repos differ.
 
 ---
 

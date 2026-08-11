@@ -10,6 +10,9 @@ const {
   proxyOllamaChat,
   ollamaChunkToOpenAI,
   ollamaDoneToOpenAI,
+  buildOllamaOptions,
+  resolveKeepAlive,
+  applySystemPreamble,
 } = require("./proxy");
 const tailscale = require("./tailscale");
 
@@ -30,6 +33,25 @@ function requireApiToken(req, res, next) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
+}
+
+/** Session id for sticky routing (IDE multi-turn / KV-cache friendliness). */
+function sessionIdFromRequest(req) {
+  const h =
+    req.headers["x-llm-session"] ||
+    req.headers["x-session-id"] ||
+    req.headers["x-continue-conversation-id"];
+  if (h && String(h).trim()) return String(h).trim().slice(0, 128);
+  const body = req.body || {};
+  const b = body.session_id || body.sessionId || body.conversation_id;
+  if (b && String(b).trim()) return String(b).trim().slice(0, 128);
+  return null;
+}
+
+function preferredServerForSession(sessionId) {
+  if (!sessionId) return null;
+  const aff = discovery.getSessionAffinity(sessionId);
+  return aff?.serverId || null;
 }
 
 async function refreshAll() {
@@ -252,14 +274,25 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
   const body = req.body || {};
   const model = body.model || "auto";
   const stream = body.stream !== false; // default stream true for UX; clients can set false
-  const messages = openaiToOllamaMessages(body.messages || []);
+  let messages = applySystemPreamble(
+    openaiToOllamaMessages(body.messages || [])
+  );
   const think = Boolean(body.think || body.reasoning);
+  const sessionId = sessionIdFromRequest(req);
+  const preferredServerId = preferredServerForSession(sessionId);
+  const ollamaOptions = buildOllamaOptions(body);
+  const keepAlive = resolveKeepAlive(body);
 
   if (!messages.length) {
     return res.status(400).json({ error: { message: "messages required" } });
   }
 
-  const decision = pickRoute({ messages, model, think });
+  const decision = pickRoute({
+    messages,
+    model,
+    think,
+    preferredServerId,
+  });
   if (decision.error) {
     return res.status(decision.status || 503).json({
       error: { message: decision.error, type: "router_error" },
@@ -295,6 +328,9 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
       res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
+      if (sessionId) res.setHeader("X-LLM-Session", sessionId);
+      res.setHeader("X-Router-Server", pick.serverName);
+      res.setHeader("X-Router-Model", pick.model);
       res.flushHeaders?.();
       writeSseMeta({
         type: "route",
@@ -303,6 +339,7 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
         serverId: pick.serverId,
         reason: decision.reason,
         modelLoaded: pickInfo.modelLoaded,
+        sessionId: sessionId || undefined,
         queue: pickInfo.queue,
       });
     }
@@ -345,6 +382,8 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
       think,
       stream,
       signal: abort.signal,
+      keep_alive: keepAlive,
+      options: ollamaOptions,
     });
 
     if (!ollamaRes.ok) {
@@ -355,6 +394,8 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
       });
     }
 
+    discovery.rememberSession(sessionId, pick.serverId, pick.model);
+
     if (!stream) {
       const data = await ollamaRes.json();
       const content = data.message?.content || "";
@@ -362,6 +403,9 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
         ok: true,
         tokensOut: data.eval_count || 0,
       });
+      if (sessionId) res.setHeader("X-LLM-Session", sessionId);
+      res.setHeader("X-Router-Server", pick.serverName);
+      res.setHeader("X-Router-Model", pick.model);
       return res.json(
         ollamaDoneToOpenAI(
           {
@@ -437,15 +481,24 @@ app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
 app.post("/api/chat", requireApiToken, async (req, res) => {
   const body = req.body || {};
   const model = body.model || "auto";
-  const messages = body.messages || [];
+  const messages = applySystemPreamble(body.messages || []);
   const stream = body.stream !== false;
   const think = Boolean(body.think);
+  const sessionId = sessionIdFromRequest(req);
+  const preferredServerId = preferredServerForSession(sessionId);
+  const ollamaOptions = buildOllamaOptions(body);
+  const keepAlive = resolveKeepAlive(body);
 
   if (!messages.length) {
     return res.status(400).json({ error: "messages required" });
   }
 
-  const decision = pickRoute({ messages, model, think });
+  const decision = pickRoute({
+    messages,
+    model,
+    think,
+    preferredServerId,
+  });
   if (decision.error) {
     return res.status(decision.status || 503).json({ error: decision.error });
   }
@@ -481,6 +534,7 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("X-Router-Model", pick.model);
       res.setHeader("X-Router-Server", pick.serverName);
+      if (sessionId) res.setHeader("X-LLM-Session", sessionId);
       res.flushHeaders?.();
 
       writeMeta({
@@ -490,6 +544,7 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
         serverId: pick.serverId,
         reason: decision.reason,
         modelLoaded: pickInfo.modelLoaded,
+        sessionId: sessionId || undefined,
         queue: pickInfo.queue,
       });
     }
@@ -527,6 +582,8 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
       think,
       stream,
       signal: abort.signal,
+      keep_alive: keepAlive,
+      options: ollamaOptions,
     });
 
     if (!ollamaRes.ok) {
@@ -539,6 +596,8 @@ app.post("/api/chat", requireApiToken, async (req, res) => {
       }
       return res.status(ollamaRes.status).json({ error: text });
     }
+
+    discovery.rememberSession(sessionId, pick.serverId, pick.model);
 
     if (stream) {
       const reader = ollamaRes.body.getReader();
