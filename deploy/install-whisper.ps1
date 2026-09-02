@@ -1,23 +1,45 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
   Install local OpenAI-compatible Whisper STT for LLMrouterVEX (Windows LLM/GPU box).
 
 .EXAMPLE
-  # Admin PowerShell one-liner:
+  # Keep the window open (Admin):
   $env:ROUTER_IP='100.69.34.12'
   irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.ps1 | iex
 #>
-param(
-  [string]$RouterIp = $env:ROUTER_IP,
-  [int]$Port = $(if ($env:PORT) { [int]$env:PORT } else { 8090 }),
-  [string]$Model = $(if ($env:WHISPER_MODEL) { $env:WHISPER_MODEL } else { "base" }),
-  [string]$Device = $(if ($env:WHISPER_DEVICE) { $env:WHISPER_DEVICE } else { "cpu" })
-)
 
+# Do NOT use #Requires — that exits the whole window when run via irm | iex.
 $ErrorActionPreference = "Stop"
+$RouterIp = $env:ROUTER_IP
+$Port = if ($env:PORT) { [int]$env:PORT } else { 8090 }
+$Model = if ($env:WHISPER_MODEL) { $env:WHISPER_MODEL } else { "base" }
+$Device = if ($env:WHISPER_DEVICE) { $env:WHISPER_DEVICE } else { "cpu" }
 $AppDir = "C:\llmrouter-whisper"
 $ServerPyUrl = "https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/whisper-openai-server.py"
+
+function Wait-Done([string]$msg) {
+  Write-Host ""
+  Write-Host $msg -ForegroundColor Yellow
+  try { [void](Read-Host "Press Enter to finish") } catch { Start-Sleep -Seconds 8 }
+}
+
+$isAdmin = $false
+try {
+  $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+  )
+} catch { }
+if (-not $isAdmin) {
+  Write-Host "This must run in Admin PowerShell (right-click PowerShell -> Run as administrator)." -ForegroundColor Red
+  Wait-Done "Window would have closed before. It will stay open now."
+  return
+}
+
+trap {
+  Write-Host "ERROR: $_" -ForegroundColor Red
+  Wait-Done "Install failed. Copy the error above, then press Enter."
+  break
+}
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
@@ -261,3 +283,4 @@ Write-Host "   curl http://127.0.0.1:$Port/health"
 Write-Host " Test from router:"
 Write-Host "   curl http://${addHost}:$Port/health"
 Write-Host "============================================================"
+Wait-Done "Install finished. Window will stay open until you press Enter."
