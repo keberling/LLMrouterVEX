@@ -85,12 +85,14 @@ function Resolve-PythonFromPyLauncher([string]$pyExe) {
 function Find-Python {
   Refresh-Path
   $cmds = @(
-    "$env:LocalAppData\Programs\Python\Python312\python.exe",
     "$env:ProgramFiles\Python312\python.exe",
+    "$env:LocalAppData\Programs\Python\Python312\python.exe",
+    "$env:LocalAppData\Python\pythoncore-3.12-64\python.exe",
+    "${env:ProgramFiles(x86)}\Python312\python.exe",
     "$env:LocalAppData\Programs\Python\Python311\python.exe",
+    "$env:ProgramFiles\Python311\python.exe",
     "$env:LocalAppData\Programs\Python\Python313\python.exe",
-    "$env:ProgramFiles\Python313\python.exe",
-    "${env:ProgramFiles(x86)}\Python312\python.exe"
+    "$env:ProgramFiles\Python313\python.exe"
   )
   foreach ($name in @("py", "python", "python3")) {
     $c = Get-Command $name -ErrorAction SilentlyContinue
@@ -122,6 +124,12 @@ if (-not $pythonExe) {
   }
   $pythonExe = Find-Python
 }
+if ($pythonExe -match '3\.14') {
+  Write-Warn "Ignoring Python 3.14 (CTranslate2 has no wheels). Installing 3.12…"
+  try { Install-Python } catch { }
+  Refresh-Path
+  $pythonExe = Find-Python
+}
 if (-not $pythonExe) {
   Write-Host @"
 Still no real Python on PATH.
@@ -144,32 +152,25 @@ try {
 function Stop-Whisper {
   Write-Step "Stopping existing Whisper process so files are not locked"
   Stop-ScheduledTask -TaskName "LLMrouterVEX-Whisper-STT" -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName "LLMrouterVEX-Whisper-STT" -Confirm:$false -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ExecutablePath -and $_.ExecutablePath -like "*llmrouter-whisper*" } |
-    ForEach-Object {
-      try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { }
-    }
-  Get-Process python, pythonw -ErrorAction SilentlyContinue |
     Where-Object {
-      try { $_.Path -like "*llmrouter-whisper*" } catch { $false }
+      ($_.ExecutablePath -and $_.ExecutablePath -like "*llmrouter-whisper*") -or
+      ($_.CommandLine -and $_.CommandLine -like "*llmrouter-whisper*")
     } |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+    ForEach-Object {
+      cmd /c "taskkill /F /PID $($_.ProcessId) /T" | Out-Null
+    }
   Start-Sleep -Seconds 2
 }
 
 Write-Step "Python venv + faster-whisper ($pythonExe)"
-$venvDir = Join-Path $AppDir "venv"
+# Fresh folder so a locked old venv cannot block reinstall
+$venvDir = Join-Path $AppDir "venv312"
 $venvPy = Join-Path $venvDir "Scripts\python.exe"
 Stop-Whisper
 if (Test-Path $venvDir) {
-  try {
-    Remove-Item $venvDir -Recurse -Force
-  } catch {
-    Write-Warn "venv still locked; retrying after a second stop…"
-    Stop-Whisper
-    Start-Sleep -Seconds 2
-    Remove-Item $venvDir -Recurse -Force
-  }
+  try { Remove-Item $venvDir -Recurse -Force } catch { Write-Warn "Could not clear $venvDir; creating over it if possible." }
 }
 & $pythonExe -m venv $venvDir
 if (-not (Test-Path -LiteralPath $venvPy)) {
