@@ -131,6 +131,13 @@ Still no real Python on PATH.
   exit 1
 }
 
+Write-Step "Visual C++ Redistributable (required by ctranslate2.dll)"
+try {
+  winget install -e --id Microsoft.VCRedist.2015+.x64 --accept-package-agreements --accept-source-agreements
+} catch {
+  Write-Warn "Could not install VC++ Redistributable via winget. Install 'Microsoft Visual C++ 2015-2022 Redistributable (x64)' if Whisper fails to load."
+}
+
 Write-Step "Python venv + faster-whisper ($pythonExe)"
 $venvDir = Join-Path $AppDir "venv"
 $venvPy = Join-Path $venvDir "Scripts\python.exe"
@@ -141,7 +148,23 @@ if (-not (Test-Path -LiteralPath $venvPy)) {
   exit 1
 }
 & $venvPy -m pip install --upgrade pip wheel
-& $venvPy -m pip install faster-whisper fastapi uvicorn python-multipart
+& $venvPy -m pip install faster-whisper fastapi uvicorn python-multipart intel-openmp
+Write-Step "Verifying ctranslate2 loads"
+$probe = @'
+import os, sys
+from pathlib import Path
+pkg = Path(sys.prefix) / "Lib" / "site-packages" / "ctranslate2"
+if pkg.is_dir():
+    os.add_dll_directory(str(pkg))
+    os.environ["PATH"] = str(pkg) + os.pathsep + os.environ.get("PATH", "")
+import ctranslate2
+print("ctranslate2", ctranslate2.__version__)
+'@
+& $venvPy -c $probe
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "ctranslate2.dll failed to load. Install Visual C++ 2015-2022 Redistributable (x64) and re-run." -ForegroundColor Red
+  exit 1
+}
 
 Write-Step "ffmpeg (required to decode iPhone m4a)"
 $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -170,6 +193,7 @@ set HOST=0.0.0.0
 set PORT=$Port
 set WHISPER_MODEL=$Model
 set WHISPER_DEVICE=$Device
+set CUDA_VISIBLE_DEVICES=-1
 "$venvPy" "$serverPath"
 "@ | Set-Content -Path $startCmd -Encoding ASCII
 

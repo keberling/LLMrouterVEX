@@ -9,14 +9,46 @@ GET  /health
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+
+def _windows_dll_setup() -> None:
+    """CTranslate2 on Windows needs its own folder + VC++ on PATH before import."""
+    if os.name != "nt":
+        return
+    roots: list[Path] = [Path(sys.executable).resolve().parent]
+    for p in sys.path:
+        ct2 = Path(p) / "ctranslate2"
+        if ct2.is_dir():
+            roots.append(ct2)
+            roots.append(Path(p))
+    seen: set[str] = set()
+    prepend: list[str] = []
+    for d in roots:
+        key = str(d)
+        if key in seen or not d.is_dir():
+            continue
+        seen.add(key)
+        prepend.append(key)
+        adder = getattr(os, "add_dll_directory", None)
+        if adder:
+            try:
+                adder(key)
+            except OSError:
+                pass
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join(prepend) + os.pathsep + os.environ.get("PATH", "")
+
+
+_windows_dll_setup()
+
 MODEL_NAME = os.environ.get("WHISPER_MODEL", "base")
-DEVICE = os.environ.get("WHISPER_DEVICE", "auto")  # auto | cuda | cpu
+DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # cpu | cuda | auto
 
 app = FastAPI(title="LLMrouterVEX Whisper STT", version="1.0.0")
 _model = None
