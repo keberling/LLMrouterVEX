@@ -2,26 +2,41 @@
 .SYNOPSIS
   Install local OpenAI-compatible Whisper STT for LLMrouterVEX (Windows LLM/GPU box).
 
-.EXAMPLE
-  # Keep the window open (Admin):
-  $env:ROUTER_IP='100.69.34.12'
-  irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.ps1 | iex
+  Always writes C:\llmrouter-whisper\install.log and does not use `exit`
+  (exit kills the PowerShell window when this is run via irm | iex).
 #>
 
-# Do NOT use #Requires — that exits the whole window when run via irm | iex.
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $RouterIp = $env:ROUTER_IP
 $Port = if ($env:PORT) { [int]$env:PORT } else { 8090 }
 $Model = if ($env:WHISPER_MODEL) { $env:WHISPER_MODEL } else { "base" }
 $Device = if ($env:WHISPER_DEVICE) { $env:WHISPER_DEVICE } else { "cpu" }
 $AppDir = "C:\llmrouter-whisper"
+$LogFile = "C:\llmrouter-whisper\install.log"
 $ServerPyUrl = "https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/whisper-openai-server.py"
 
 function Wait-Done([string]$msg) {
   Write-Host ""
   Write-Host $msg -ForegroundColor Yellow
-  try { [void](Read-Host "Press Enter to finish") } catch { Start-Sleep -Seconds 8 }
+  Write-Host "Log: $LogFile" -ForegroundColor Yellow
+  try { [void](Read-Host "Press Enter to finish") } catch { Start-Sleep -Seconds 15 }
 }
+
+function Write-Step($msg) {
+  $line = "==> $msg"
+  Write-Host $line -ForegroundColor Cyan
+  Add-Content -Path $LogFile -Value $line
+}
+function Write-Warn($msg) {
+  $line = "    $msg"
+  Write-Host $line -ForegroundColor Yellow
+  Add-Content -Path $LogFile -Value $line
+}
+
+try {
+  New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+  Start-Transcript -Path $LogFile -Force | Out-Null
+} catch { }
 
 $isAdmin = $false
 try {
@@ -30,44 +45,23 @@ try {
   )
 } catch { }
 if (-not $isAdmin) {
-  Write-Host "This must run in Admin PowerShell (right-click PowerShell -> Run as administrator)." -ForegroundColor Red
-  Wait-Done "Window would have closed before. It will stay open now."
+  Write-Host "This must run in Admin PowerShell (right-click -> Run as administrator)." -ForegroundColor Red
+  Wait-Done "Not admin. Window staying open."
   return
 }
 
-trap {
-  Write-Host "ERROR: $_" -ForegroundColor Red
-  Wait-Done "Install failed. Copy the error above, then press Enter."
-  break
-}
-
-function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
-function Write-Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
-
 if (-not $RouterIp) {
-  Write-Host @"
-Missing ROUTER_IP.
-
-Admin PowerShell:
-  `$env:ROUTER_IP='100.69.34.12'
-  irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.ps1 | iex
-"@ -ForegroundColor Yellow
-  exit 1
+  Write-Host "Set `$env:ROUTER_IP='100.69.34.12' then re-run." -ForegroundColor Yellow
+  Wait-Done "ROUTER_IP missing."
+  return
 }
 
+try {
 Write-Step "Installing Whisper STT for router $RouterIp on port $Port"
-
-New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
 
 Write-Step "Downloading server.py"
 $serverPath = Join-Path $AppDir "server.py"
-$localScript = $null
-if ($PSScriptRoot) { $localScript = Join-Path $PSScriptRoot "whisper-openai-server.py" }
-if ($localScript -and (Test-Path $localScript)) {
-  Copy-Item $localScript $serverPath -Force
-} else {
-  Invoke-WebRequest -Uri $ServerPyUrl -OutFile $serverPath -UseBasicParsing
-}
+Invoke-WebRequest -Uri $ServerPyUrl -OutFile $serverPath -UseBasicParsing
 
 function Refresh-Path {
   $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
@@ -81,16 +75,10 @@ function Test-RealPython([string]$exe) {
   if ($exe -match 'pythoncore-3\.14') { return $false }
   if (-not (Test-Path -LiteralPath $exe)) { return $false }
   try {
-    $code = @"
-import sys
-ok = (3, 10) <= sys.version_info[:2] <= (3, 13)
-raise SystemExit(0 if ok else 1)
-"@
+    $code = "import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)"
     & $exe -c $code 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
-  } catch {
-    return $false
-  }
+  } catch { return $false }
 }
 
 function Resolve-PythonFromPyLauncher([string]$pyExe) {
@@ -132,47 +120,31 @@ function Find-Python {
   return $null
 }
 
-function Install-Python {
-  Write-Step "No real Python found (Windows Store stub does not count). Installing Python 3.12…"
-  winget install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
-  Refresh-Path
-}
-
 $pythonExe = Find-Python
 if (-not $pythonExe) {
-  try { Install-Python } catch {
-    Write-Host "winget could not install Python. Install from https://www.python.org/downloads/ — check 'Add python.exe to PATH' — then re-run." -ForegroundColor Red
-    exit 1
-  }
+  Write-Step "Installing Python 3.12 via winget"
+  winget install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
+  Refresh-Path
   $pythonExe = Find-Python
 }
-if ($pythonExe -match '3\.14') {
-  Write-Warn "Ignoring Python 3.14 (CTranslate2 has no wheels). Installing 3.12…"
-  try { Install-Python } catch { }
+if ($pythonExe -match '3\.14' -or -not $pythonExe) {
+  Write-Warn "Need Python 3.12 (not 3.14). Installing 3.12…"
+  winget install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
   Refresh-Path
   $pythonExe = Find-Python
 }
 if (-not $pythonExe) {
-  Write-Host @"
-Still no real Python on PATH.
-
-1) Settings → Apps → Advanced app settings → App execution aliases
-   Turn OFF python.exe and python3.exe
-2) Install https://www.python.org/downloads/ with 'Add python.exe to PATH'
-3) Close this window, open a NEW Admin PowerShell, re-run the installer.
-"@ -ForegroundColor Red
-  exit 1
+  Wait-Done "No Python 3.12 found. Install from python.org with Add to PATH, then re-run."
+  return
 }
 
-Write-Step "Visual C++ Redistributable (required by ctranslate2.dll)"
+Write-Step "Using Python $pythonExe"
 try {
   winget install -e --id Microsoft.VCRedist.2015+.x64 --accept-package-agreements --accept-source-agreements
-} catch {
-  Write-Warn "Could not install VC++ Redistributable via winget. Install 'Microsoft Visual C++ 2015-2022 Redistributable (x64)' if Whisper fails to load."
-}
+} catch { Write-Warn "VC++ redist winget skipped: $_" }
 
 function Stop-Whisper {
-  Write-Step "Stopping existing Whisper process so files are not locked"
+  Write-Step "Stopping existing Whisper"
   Stop-ScheduledTask -TaskName "LLMrouterVEX-Whisper-STT" -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName "LLMrouterVEX-Whisper-STT" -Confirm:$false -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -180,107 +152,120 @@ function Stop-Whisper {
       ($_.ExecutablePath -and $_.ExecutablePath -like "*llmrouter-whisper*") -or
       ($_.CommandLine -and $_.CommandLine -like "*llmrouter-whisper*")
     } |
-    ForEach-Object {
-      cmd /c "taskkill /F /PID $($_.ProcessId) /T" | Out-Null
-    }
+    ForEach-Object { cmd /c "taskkill /F /PID $($_.ProcessId) /T" | Out-Null }
   Start-Sleep -Seconds 2
 }
 
-Write-Step "Python venv + faster-whisper ($pythonExe)"
-# Fresh folder so a locked old venv cannot block reinstall
 $venvDir = Join-Path $AppDir "venv312"
 $venvPy = Join-Path $venvDir "Scripts\python.exe"
 Stop-Whisper
-if (Test-Path $venvDir) {
-  try { Remove-Item $venvDir -Recurse -Force } catch { Write-Warn "Could not clear $venvDir; creating over it if possible." }
-}
-& $pythonExe -m venv $venvDir
+Write-Step "Python venv + faster-whisper"
 if (-not (Test-Path -LiteralPath $venvPy)) {
-  Write-Host "venv was not created at $venvPy. Python is still the Store stub. Install python.org Python and disable App execution aliases." -ForegroundColor Red
-  exit 1
+  & $pythonExe -m venv $venvDir
+}
+if (-not (Test-Path -LiteralPath $venvPy)) {
+  Wait-Done "venv python missing at $venvPy"
+  return
 }
 & $venvPy -m pip install --upgrade pip wheel
 & $venvPy -m pip install faster-whisper fastapi uvicorn python-multipart intel-openmp
-Write-Step "Verifying ctranslate2 loads"
-$probe = @'
+Write-Step "Verifying ctranslate2"
+$probe = @"
 import os, sys
 from pathlib import Path
-pkg = Path(sys.prefix) / "Lib" / "site-packages" / "ctranslate2"
+pkg = Path(sys.prefix) / 'Lib' / 'site-packages' / 'ctranslate2'
 if pkg.is_dir():
     os.add_dll_directory(str(pkg))
-    os.environ["PATH"] = str(pkg) + os.pathsep + os.environ.get("PATH", "")
+    os.environ['PATH'] = str(pkg) + os.pathsep + os.environ.get('PATH', '')
 import ctranslate2
-print("ctranslate2", ctranslate2.__version__)
-'@
+print('ctranslate2', ctranslate2.__version__)
+"@
 & $venvPy -c $probe
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "ctranslate2.dll failed to load. Install Visual C++ 2015-2022 Redistributable (x64) and re-run." -ForegroundColor Red
-  exit 1
+  Write-Warn "ctranslate2 import failed. Whisper may still start after a reboot (VC++)."
 }
 
-Write-Step "ffmpeg (required to decode iPhone m4a)"
-$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
-if (-not $ffmpeg) {
-  try {
-    winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements
-  } catch {
-    Write-Warn "Could not install ffmpeg via winget. Install ffmpeg and add it to PATH if transcription of .m4a fails."
-  }
+if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+  try { winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements } catch { }
 }
 
-Write-Step "Firewall: TCP $Port from $RouterIp (+ tailnet)"
-$rule = "LLMrouterVEX STT $Port"
-Get-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-New-NetFirewallRule -DisplayName $rule -Direction Inbound -Protocol TCP -LocalPort $Port `
-  -RemoteAddress $RouterIp -Action Allow | Out-Null
+Write-Step "Firewall TCP $Port from $RouterIp"
+Get-NetFirewallRule -DisplayName "LLMrouterVEX STT $Port" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName "LLMrouterVEX STT $Port" -Direction Inbound -Protocol TCP -LocalPort $Port -RemoteAddress $RouterIp -Action Allow -ErrorAction SilentlyContinue | Out-Null
 if ($RouterIp -match '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.') {
-  New-NetFirewallRule -DisplayName "LLMrouterVEX STT tailnet $Port" -Direction Inbound -Protocol TCP -LocalPort $Port `
-    -RemoteAddress "100.64.0.0/10" -Action Allow -ErrorAction SilentlyContinue | Out-Null
+  New-NetFirewallRule -DisplayName "LLMrouterVEX STT tailnet $Port" -Direction Inbound -Protocol TCP -LocalPort $Port -RemoteAddress "100.64.0.0/10" -Action Allow -ErrorAction SilentlyContinue | Out-Null
 }
 
 $startCmd = Join-Path $AppDir "start.cmd"
 @"
 @echo off
+cd /d $AppDir
 set HOST=0.0.0.0
 set PORT=$Port
 set WHISPER_MODEL=$Model
 set WHISPER_DEVICE=$Device
 set CUDA_VISIBLE_DEVICES=-1
-"$venvPy" "$serverPath"
+"$venvPy" -u "$serverPath" >> "$AppDir\whisper.log" 2>&1
 "@ | Set-Content -Path $startCmd -Encoding ASCII
 
-Write-Step "Scheduled task (start at boot)"
+Write-Step "Register boot task + start Whisper now"
 $taskName = "LLMrouterVEX-Whisper-STT"
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-$action = New-ScheduledTaskAction -Execute $startCmd -WorkingDirectory $AppDir
+$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$startCmd`"" -WorkingDirectory $AppDir
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-Start-ScheduledTask -TaskName $taskName
 
-Start-Sleep -Seconds 3
+$env:HOST = "0.0.0.0"
+$env:PORT = "$Port"
+$env:WHISPER_MODEL = $Model
+$env:WHISPER_DEVICE = $Device
+$env:CUDA_VISIBLE_DEVICES = "-1"
+Start-Process -FilePath $venvPy -ArgumentList @("-u", $serverPath) -WorkingDirectory $AppDir -WindowStyle Hidden -RedirectStandardOutput "$AppDir\whisper.out.log" -RedirectStandardError "$AppDir\whisper.err.log"
+Start-Sleep -Seconds 4
+
+Write-Step "Local health check"
+try {
+  $h = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -UseBasicParsing -TimeoutSec 5
+  Write-Step "Health $($h.StatusCode) $($h.Content)"
+} catch {
+  Write-Warn "Health check failed: $_. See $AppDir\whisper.err.log"
+  if (Test-Path "$AppDir\whisper.err.log") { Get-Content "$AppDir\whisper.err.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Warn $_ } }
+}
+
 $tsIp = $null
-$ts = Get-Command tailscale -ErrorAction SilentlyContinue
-if ($ts) {
+if (Get-Command tailscale -ErrorAction SilentlyContinue) {
   try { $tsIp = (& tailscale ip -4 2>$null | Select-Object -First 1) } catch { }
 }
-$addHost = if ($tsIp) { $tsIp } else { (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' } | Select-Object -First 1).IPAddress }
+$addHost = if ($tsIp) { $tsIp } else {
+  (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*' } |
+    Select-Object -First 1).IPAddress
+}
 
 Write-Host ""
 Write-Host "============================================================"
-Write-Host " Whisper STT ready for LLMrouterVEX"
+Write-Host " Whisper STT"
+Write-Host " Python:        $pythonExe"
 Write-Host " This host:     $addHost"
 Write-Host " Listen:        0.0.0.0:$Port"
 Write-Host " Model:         $Model ($Device)"
 Write-Host " Allowed from:  $RouterIp"
+Write-Host " Log:           $LogFile"
+Write-Host " Whisper log:   $AppDir\whisper.err.log"
 Write-Host ""
-Write-Host " On the router UI -> Servers:"
-Write-Host "   Kind: Whisper STT"
-Write-Host "   Host: ${addHost}:$Port"
-Write-Host ""
-Write-Host " Test from this box:"
-Write-Host "   curl http://127.0.0.1:$Port/health"
-Write-Host " Test from router:"
-Write-Host "   curl http://${addHost}:$Port/health"
+Write-Host " Router UI -> Servers -> Kind Whisper STT -> ${addHost}:$Port"
 Write-Host "============================================================"
-Wait-Done "Install finished. Window will stay open until you press Enter."
+
+} catch {
+  Write-Host "ERROR: $_" -ForegroundColor Red
+  Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+  try { Stop-Transcript | Out-Null } catch { }
+  try { notepad.exe $LogFile } catch { }
+  Wait-Done "Install hit an error. Notepad should show the log."
+  return
+}
+
+try { Stop-Transcript | Out-Null } catch { }
+try { notepad.exe $LogFile } catch { }
+Wait-Done "Done. Notepad opened install.log. Press Enter."
