@@ -47,16 +47,99 @@ if ($localScript -and (Test-Path $localScript)) {
   Invoke-WebRequest -Uri $ServerPyUrl -OutFile $serverPath -UseBasicParsing
 }
 
-$py = Get-Command python -ErrorAction SilentlyContinue
-if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
-if (-not $py) {
-  Write-Host "Python 3 is required. Install from https://www.python.org/downloads/ (check 'Add python.exe to PATH'), then re-run." -ForegroundColor Red
+function Refresh-Path {
+  $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $env:Path = "$machinePath;$userPath"
+}
+
+function Test-RealPython([string]$exe) {
+  if (-not $exe) { return $false }
+  if ($exe -match '\\WindowsApps\\') { return $false }
+  if (-not (Test-Path -LiteralPath $exe)) { return $false }
+  try {
+    $code = @"
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+"@
+    & $exe -c $code 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
+}
+
+function Resolve-PythonFromPyLauncher([string]$pyExe) {
+  try {
+    $out = & $pyExe -3 -c "import sys; print(sys.executable)" 2>$null
+    $resolved = if ($out) { ($out | Select-Object -Last 1).Trim() } else { $null }
+    if ($resolved -and (Test-RealPython $resolved)) { return $resolved }
+  } catch { }
+  return $null
+}
+
+function Find-Python {
+  Refresh-Path
+  $cmds = @()
+  foreach ($name in @("py", "python", "python3")) {
+    $c = Get-Command $name -ErrorAction SilentlyContinue
+    if ($c -and $c.Source) { $cmds += $c.Source }
+  }
+  $cmds += @(
+    "$env:LocalAppData\Programs\Python\Python313\python.exe",
+    "$env:LocalAppData\Programs\Python\Python312\python.exe",
+    "$env:LocalAppData\Programs\Python\Python311\python.exe",
+    "$env:ProgramFiles\Python313\python.exe",
+    "$env:ProgramFiles\Python312\python.exe",
+    "${env:ProgramFiles(x86)}\Python313\python.exe"
+  )
+  foreach ($exe in $cmds) {
+    if ($exe -match '\\WindowsApps\\') { continue }
+    if ($exe -match '\\py\.exe$') {
+      $resolved = Resolve-PythonFromPyLauncher $exe
+      if ($resolved) { return $resolved }
+      continue
+    }
+    if (Test-RealPython $exe) { return $exe }
+  }
+  return $null
+}
+
+function Install-Python {
+  Write-Step "No real Python found (Windows Store stub does not count). Installing Python 3.12…"
+  winget install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
+  Refresh-Path
+}
+
+$pythonExe = Find-Python
+if (-not $pythonExe) {
+  try { Install-Python } catch {
+    Write-Host "winget could not install Python. Install from https://www.python.org/downloads/ — check 'Add python.exe to PATH' — then re-run." -ForegroundColor Red
+    exit 1
+  }
+  $pythonExe = Find-Python
+}
+if (-not $pythonExe) {
+  Write-Host @"
+Still no real Python on PATH.
+
+1) Settings → Apps → Advanced app settings → App execution aliases
+   Turn OFF python.exe and python3.exe
+2) Install https://www.python.org/downloads/ with 'Add python.exe to PATH'
+3) Close this window, open a NEW Admin PowerShell, re-run the installer.
+"@ -ForegroundColor Red
   exit 1
 }
 
-Write-Step "Python venv + faster-whisper ($($py.Source))"
-$venvPy = Join-Path $AppDir "venv\Scripts\python.exe"
-& $py.Source -m venv (Join-Path $AppDir "venv")
+Write-Step "Python venv + faster-whisper ($pythonExe)"
+$venvDir = Join-Path $AppDir "venv"
+$venvPy = Join-Path $venvDir "Scripts\python.exe"
+if (Test-Path $venvDir) { Remove-Item $venvDir -Recurse -Force }
+& $pythonExe -m venv $venvDir
+if (-not (Test-Path -LiteralPath $venvPy)) {
+  Write-Host "venv was not created at $venvPy. Python is still the Store stub. Install python.org Python and disable App execution aliases." -ForegroundColor Red
+  exit 1
+}
 & $venvPy -m pip install --upgrade pip wheel
 & $venvPy -m pip install faster-whisper fastapi uvicorn python-multipart
 
