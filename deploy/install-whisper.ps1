@@ -56,11 +56,13 @@ function Refresh-Path {
 function Test-RealPython([string]$exe) {
   if (-not $exe) { return $false }
   if ($exe -match '\\WindowsApps\\') { return $false }
+  if ($exe -match 'pythoncore-3\.14') { return $false }
   if (-not (Test-Path -LiteralPath $exe)) { return $false }
   try {
     $code = @"
 import sys
-raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+ok = (3, 10) <= sys.version_info[:2] <= (3, 13)
+raise SystemExit(0 if ok else 1)
 "@
     & $exe -c $code 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
@@ -70,29 +72,30 @@ raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
 }
 
 function Resolve-PythonFromPyLauncher([string]$pyExe) {
-  try {
-    $out = & $pyExe -3 -c "import sys; print(sys.executable)" 2>$null
-    $resolved = if ($out) { ($out | Select-Object -Last 1).Trim() } else { $null }
-    if ($resolved -and (Test-RealPython $resolved)) { return $resolved }
-  } catch { }
+  foreach ($flag in @("-3.12", "-3.11", "-3.13", "-3")) {
+    try {
+      $out = & $pyExe $flag -c "import sys; print(sys.executable)" 2>$null
+      $resolved = if ($out) { ($out | Select-Object -Last 1).Trim() } else { $null }
+      if ($resolved -and (Test-RealPython $resolved)) { return $resolved }
+    } catch { }
+  }
   return $null
 }
 
 function Find-Python {
   Refresh-Path
-  $cmds = @()
+  $cmds = @(
+    "$env:LocalAppData\Programs\Python\Python312\python.exe",
+    "$env:ProgramFiles\Python312\python.exe",
+    "$env:LocalAppData\Programs\Python\Python311\python.exe",
+    "$env:LocalAppData\Programs\Python\Python313\python.exe",
+    "$env:ProgramFiles\Python313\python.exe",
+    "${env:ProgramFiles(x86)}\Python312\python.exe"
+  )
   foreach ($name in @("py", "python", "python3")) {
     $c = Get-Command $name -ErrorAction SilentlyContinue
     if ($c -and $c.Source) { $cmds += $c.Source }
   }
-  $cmds += @(
-    "$env:LocalAppData\Programs\Python\Python313\python.exe",
-    "$env:LocalAppData\Programs\Python\Python312\python.exe",
-    "$env:LocalAppData\Programs\Python\Python311\python.exe",
-    "$env:ProgramFiles\Python313\python.exe",
-    "$env:ProgramFiles\Python312\python.exe",
-    "${env:ProgramFiles(x86)}\Python313\python.exe"
-  )
   foreach ($exe in $cmds) {
     if ($exe -match '\\WindowsApps\\') { continue }
     if ($exe -match '\\py\.exe$') {
@@ -138,10 +141,36 @@ try {
   Write-Warn "Could not install VC++ Redistributable via winget. Install 'Microsoft Visual C++ 2015-2022 Redistributable (x64)' if Whisper fails to load."
 }
 
+function Stop-Whisper {
+  Write-Step "Stopping existing Whisper process so files are not locked"
+  Stop-ScheduledTask -TaskName "LLMrouterVEX-Whisper-STT" -ErrorAction SilentlyContinue
+  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and $_.ExecutablePath -like "*llmrouter-whisper*" } |
+    ForEach-Object {
+      try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { }
+    }
+  Get-Process python, pythonw -ErrorAction SilentlyContinue |
+    Where-Object {
+      try { $_.Path -like "*llmrouter-whisper*" } catch { $false }
+    } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 2
+}
+
 Write-Step "Python venv + faster-whisper ($pythonExe)"
 $venvDir = Join-Path $AppDir "venv"
 $venvPy = Join-Path $venvDir "Scripts\python.exe"
-if (Test-Path $venvDir) { Remove-Item $venvDir -Recurse -Force }
+Stop-Whisper
+if (Test-Path $venvDir) {
+  try {
+    Remove-Item $venvDir -Recurse -Force
+  } catch {
+    Write-Warn "venv still locked; retrying after a second stop…"
+    Stop-Whisper
+    Start-Sleep -Seconds 2
+    Remove-Item $venvDir -Recurse -Force
+  }
+}
 & $pythonExe -m venv $venvDir
 if (-not (Test-Path -LiteralPath $venvPy)) {
   Write-Host "venv was not created at $venvPy. Python is still the Store stub. Install python.org Python and disable App execution aliases." -ForegroundColor Red
