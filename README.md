@@ -335,11 +335,20 @@ curl http://ROUTER:8080/v1/audio/transcriptions \
   -F model=whisper-1
 ```
 
-Install Whisper on a GPU box (or the router VM for `tiny`/`base` on CPU):
+Install Whisper on a **GPU / LLM box** (not required on the router VM):
+
+Ubuntu/Debian:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.sh \
-  | sudo bash -s -- <ROUTER_IP>
+  | sudo bash -s -- 100.69.34.12
+```
+
+Windows (Admin PowerShell):
+
+```powershell
+$env:ROUTER_IP='100.69.34.12'
+irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.ps1 | iex
 ```
 
 Then either:

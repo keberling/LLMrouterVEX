@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Install a local OpenAI-compatible Whisper STT server for LLMrouterVEX.
 #
-# Run on a GPU box (or the router VM for CPU/tiny models):
+# Run on a GPU / LLM box (Ubuntu/Debian) — not on Windows (use install-whisper.ps1).
+#
 #   curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.sh \
-#     | sudo bash -s -- <ROUTER_IP>
+#     | sudo bash -s -- 100.69.34.12
 #
 # Optional env:
 #   PORT=8090
 #   WHISPER_MODEL=base          # tiny | base | small | medium | large-v3
-#   WHISPER_DEVICE=auto         # auto | cuda | cpu
+#   WHISPER_DEVICE=cpu          # cpu is the reliable default; set cuda if NVIDIA stack works
 #
 # Then on the router UI → Servers → Kind: Whisper STT → host <this-ip>:8090
 set -euo pipefail
@@ -18,43 +19,70 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+if ! command -v apt-get >/dev/null 2>&1; then
+  cat <<'EOF'
+This script is for Ubuntu/Debian.
+
+On a Windows LLM box (Admin PowerShell):
+  $env:ROUTER_IP='100.69.34.12'
+  irm https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.ps1 | iex
+EOF
+  exit 1
+fi
+
 ROUTER_IP="${1:-${ROUTER_IP:-}}"
 PORT="${PORT:-8090}"
 WHISPER_MODEL="${WHISPER_MODEL:-base}"
-WHISPER_DEVICE="${WHISPER_DEVICE:-auto}"
+WHISPER_DEVICE="${WHISPER_DEVICE:-cpu}"
 APP_DIR="/opt/llmrouter-whisper"
 SERVICE_USER="whisper"
-REPO_URL="${REPO_URL:-https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/whisper-openai-server.py}"
+SERVER_PY_URL="${SERVER_PY_URL:-https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/whisper-openai-server.py}"
 
 if [[ -z "$ROUTER_IP" ]]; then
   echo "Usage: $0 <ROUTER_IP>"
   echo "ROUTER_IP = the LLMrouterVEX host (LAN IP or Tailscale 100.x IP)."
+  echo "Example: sudo bash $0 100.69.34.12"
   exit 1
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-echo "==> Installing ffmpeg + python3 venv"
+echo "==> Installing ffmpeg + python venv + ctranslate2 libs"
 apt-get update -y
-apt-get install -y python3 python3-venv python3-pip ffmpeg ca-certificates curl
+apt-get install -y \
+  python3 python3-venv python3-pip python3-dev \
+  ffmpeg ca-certificates curl \
+  libgomp1 gcc
 
 echo "==> Creating service user"
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-  useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
+  useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin "$SERVICE_USER" || \
+    useradd --system --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
+getent group "$SERVICE_USER" >/dev/null 2>&1 || groupadd --system "$SERVICE_USER"
+usermod -a -G "$SERVICE_USER" "$SERVICE_USER" >/dev/null 2>&1 || true
 
 mkdir -p "$APP_DIR"
 echo "==> Fetching Whisper OpenAI server"
-if [[ -f "$(dirname "$0")/whisper-openai-server.py" ]]; then
-  cp "$(dirname "$0")/whisper-openai-server.py" "$APP_DIR/server.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+if [[ -n "${SCRIPT_DIR:-}" && -f "${SCRIPT_DIR}/whisper-openai-server.py" ]]; then
+  cp "${SCRIPT_DIR}/whisper-openai-server.py" "$APP_DIR/server.py"
 else
-  curl -fsSL "$REPO_URL" -o "$APP_DIR/server.py"
+  curl -fsSL "$SERVER_PY_URL" -o "$APP_DIR/server.py"
 fi
 chmod 644 "$APP_DIR/server.py"
+head -1 "$APP_DIR/server.py" | grep -q python || {
+  echo "Failed to download whisper-openai-server.py"
+  exit 1
+}
 
 echo "==> Python venv + faster-whisper"
+rm -rf "$APP_DIR/venv"
 python3 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/pip" install --upgrade pip
-"$APP_DIR/venv/bin/pip" install "faster-whisper" "fastapi" "uvicorn" "python-multipart"
+"$APP_DIR/venv/bin/pip" install --upgrade pip wheel
+if ! "$APP_DIR/venv/bin/pip" install "faster-whisper" "fastapi" "uvicorn" "python-multipart"; then
+  echo "pip install failed. Retrying once…"
+  "$APP_DIR/venv/bin/pip" install "faster-whisper" "fastapi" "uvicorn" "python-multipart"
+fi
 
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 
@@ -85,7 +113,27 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now llmrouter-whisper.service
+systemctl enable llmrouter-whisper.service
+if ! systemctl restart llmrouter-whisper.service; then
+  echo "ERROR: llmrouter-whisper.service failed to start"
+  journalctl -u llmrouter-whisper -n 80 --no-pager || true
+  exit 1
+fi
+sleep 2
+if ! systemctl is-active --quiet llmrouter-whisper.service; then
+  echo "ERROR: llmrouter-whisper.service is not active"
+  systemctl --no-pager -l status llmrouter-whisper.service || true
+  journalctl -u llmrouter-whisper -n 80 --no-pager || true
+  exit 1
+fi
+
+echo "==> Local health check"
+if ! curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health"; then
+  echo
+  echo "Service is running but /health did not respond yet. Logs:"
+  journalctl -u llmrouter-whisper -n 40 --no-pager || true
+fi
+echo
 
 echo "==> Firewall: allow ${PORT}/tcp from router ${ROUTER_IP}"
 if command -v ufw >/dev/null 2>&1; then
@@ -104,7 +152,8 @@ if command -v ufw >/dev/null 2>&1; then
 fi
 
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null || true)"
+TS_IP="$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null | head -1 || true)"
+ADD_HOST="${TS_IP:-${HOST_IP}}"
 echo ""
 echo "============================================================"
 echo " Whisper STT ready for LLMrouterVEX"
@@ -116,11 +165,14 @@ echo " Allowed from:  ${ROUTER_IP}"
 echo ""
 echo " On the router UI → Servers:"
 echo "   Kind: Whisper STT"
-echo "   Host: ${TS_IP:-${HOST_IP}}:${PORT}"
+echo "   Host: ${ADD_HOST}:${PORT}"
 echo ""
-echo " Or set on the router VM:"
-echo "   Environment=STT_BACKEND_URL=http://${TS_IP:-${HOST_IP}}:${PORT}/v1"
+echo " Or on the router VM:"
+echo "   sudo systemctl edit llmrouter"
+echo "   [Service]"
+echo "   Environment=STT_BACKEND_URL=http://${ADD_HOST}:${PORT}/v1"
+echo "   sudo systemctl daemon-reload && sudo systemctl restart llmrouter"
 echo ""
-echo " Test from router:"
-echo "   curl http://${TS_IP:-${HOST_IP}}:${PORT}/health"
+echo " Test from router (${ROUTER_IP}):"
+echo "   curl http://${ADD_HOST}:${PORT}/health"
 echo "============================================================"
