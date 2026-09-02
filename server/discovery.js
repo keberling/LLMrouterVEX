@@ -241,6 +241,8 @@ function emptyRuntime(server) {
     baseUrl: server.baseUrl,
     host: server.host,
     port: server.port,
+    kind: server.kind || "ollama",
+    sttApi: server.sttApi || "auto",
     enabled: server.enabled,
     healthy: false,
     lastError: null,
@@ -271,6 +273,8 @@ function ensureRuntime(server) {
   rt.host = server.host;
   rt.port = server.port;
   rt.enabled = server.enabled;
+  rt.kind = server.kind || "ollama";
+  rt.sttApi = server.sttApi || "auto";
   return rt;
 }
 
@@ -354,8 +358,89 @@ async function probeHardware(baseUrl) {
   return null;
 }
 
+async function probeSttServer(server) {
+  const rt = ensureRuntime(server);
+  if (!server.enabled) {
+    rt.healthy = false;
+    rt.lastError = "disabled";
+    rt.lastProbeAt = new Date().toISOString();
+    return rt;
+  }
+
+  const base = server.baseUrl.replace(/\/$/, "");
+  const origins = [base];
+  if (!base.endsWith("/v1")) origins.push(`${base}/v1`);
+
+  const urls = [];
+  for (const origin of origins) {
+    urls.push(`${origin}/models`, `${origin}/health`, `${origin}/`);
+  }
+  urls.push(`${base.replace(/\/v1$/, "")}/health`);
+
+  let lastErr = "STT probe failed";
+  for (const url of urls) {
+    try {
+      const { data, latencyMs } = await fetchJson(url);
+      const models = [];
+      const listed = data?.data || data?.models || [];
+      if (Array.isArray(listed)) {
+        for (const m of listed) {
+          const name = m.id || m.name;
+          if (!name) continue;
+          models.push({
+            name,
+            size: null,
+            sizeLabel: null,
+            modifiedAt: null,
+            details: {},
+            capabilities: ["audio", "stt"],
+            profile: { name, tags: ["stt"], capabilities: ["audio"] },
+          });
+        }
+      }
+      if (!models.length) {
+        models.push({
+          name: "whisper-1",
+          size: null,
+          sizeLabel: null,
+          modifiedAt: null,
+          details: {},
+          capabilities: ["audio", "stt"],
+          profile: { name: "whisper-1", tags: ["stt"], capabilities: ["audio"] },
+        });
+      }
+      rt.healthy = true;
+      rt.lastError = null;
+      rt.lastProbeAt = new Date().toISOString();
+      rt.latencyMs = latencyMs;
+      rt.version = data?.version || data?.engine || "whisper";
+      rt.models = models;
+      rt.loaded = [];
+      rt.load = {
+        activeGenerations: activeByServer.get(server.id) || 0,
+        loadedModelCount: 0,
+        vramBytes: 0,
+        vramLabel: null,
+      };
+      return rt;
+    } catch (err) {
+      lastErr = err.message || "STT probe failed";
+    }
+  }
+
+  rt.healthy = false;
+  rt.lastError = lastErr;
+  rt.lastProbeAt = new Date().toISOString();
+  rt.models = [];
+  rt.loaded = [];
+  return rt;
+}
+
 async function probeServer(server) {
   const rt = ensureRuntime(server);
+  if ((server.kind || "ollama") === "stt") {
+    return probeSttServer(server);
+  }
   if (!server.enabled) {
     rt.healthy = false;
     rt.lastError = "disabled";
@@ -476,6 +561,7 @@ function recordRequest(serverId, { ok, tokensOut = 0 } = {}) {
 function buildCandidates() {
   const out = [];
   for (const rt of runtime.values()) {
+    if ((rt.kind || "ollama") === "stt") continue;
     if (!rt.enabled || !rt.healthy) continue;
     const loadedNames = new Set((rt.loaded || []).map((m) => m.name));
     const active = activeByServer.get(rt.id) || 0;
@@ -504,6 +590,7 @@ function catalogSummary() {
   const modelMap = new Map(); // name -> { name, servers: [], ... }
 
   for (const rt of servers) {
+    if ((rt.kind || "ollama") === "stt") continue;
     for (const m of rt.models || []) {
       if (!modelMap.has(m.name)) {
         modelMap.set(m.name, {
@@ -536,6 +623,10 @@ function catalogSummary() {
       servers: servers.length,
       healthy: servers.filter((s) => s.healthy).length,
       models: modelMap.size,
+      stt: servers.filter((s) => (s.kind || "ollama") === "stt").length,
+      sttHealthy: servers.filter(
+        (s) => (s.kind || "ollama") === "stt" && s.healthy
+      ).length,
       active: [...activeByServer.values()].reduce((a, b) => a + b, 0),
     },
   };

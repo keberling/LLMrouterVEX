@@ -8,6 +8,7 @@ Multi-server **Ollama** router for a small Ubuntu VM.
 - Prefer already-loaded models to reduce VRAM thrash
 - Dashboard with **server cards** (health, latency, models, load)
 - **OpenAI-compatible** API for apps: `POST /v1/chat/completions`
+- **OpenAI-compatible STT** for apps: `POST /v1/audio/transcriptions` (local Whisper)
 - Ollama-compatible proxy: `POST /api/chat`
 - Lightweight: Node.js only, JSON on disk, no database server
 - **Tailscale** mesh: join the router, discover peers, add remote Ollama nodes by Tailscale IP / MagicDNS
@@ -234,6 +235,8 @@ Environment=HOST=0.0.0.0
 Environment=LLMROUTER_DATA=/var/lib/llmroutervex
 Environment=DISCOVERY_INTERVAL_MS=15000
 Environment=LLMROUTER_API_TOKEN=super-secret
+# Local Whisper for Voice Portal (install-whisper.sh on a GPU box)
+# Environment=STT_BACKEND_URL=http://100.x.x.x:8090/v1
 # Keep coding models warm in VRAM (Ollama keep_alive). Use -1 to never unload.
 Environment=LLMROUTER_KEEP_ALIVE=30m
 # Optional default context if client omits options.num_ctx (0 = off)
@@ -319,6 +322,38 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp.choices[0].message.content)
+```
+
+### Speech-to-text (Voice Portal)
+
+Ollama does **not** transcribe audio. Apps still talk only to this router:
+
+```bash
+curl http://ROUTER:8080/v1/audio/transcriptions \
+  -H "Authorization: Bearer not-needed" \
+  -F file=@memo.m4a \
+  -F model=whisper-1
+```
+
+Install Whisper on a GPU box (or the router VM for `tiny`/`base` on CPU):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/keberling/LLMrouterVEX/main/deploy/install-whisper.sh \
+  | sudo bash -s -- <ROUTER_IP>
+```
+
+Then either:
+
+1. Router UI → **Servers** → Kind **Whisper STT** → host `<gpu-ip>:8090`
+2. Router VM: `Environment=STT_BACKEND_URL=http://<gpu-ip>:8090/v1`
+
+Voice Portal env (only this router — no OpenAI / xAI):
+
+```
+LLM_BASE_URL=http://ROUTER:8080/v1
+LLM_API_KEY=local
+LLM_MODEL=auto
+STT_MODEL=whisper-1
 ```
 
 ### Force a model
@@ -430,7 +465,7 @@ Optional **agent** (future / custom): if `http://<host>:9100/stats` returns GPU/
 |--------|------|-------------|
 | GET | `/api/health` | Service health + totals |
 | GET | `/api/servers` | Registered servers + live runtime |
-| POST | `/api/servers` | Add server `{ host, name?, notes? }` |
+| POST | `/api/servers` | Add server `{ host, name?, notes?, kind?, sttApi? }` (`kind`: `ollama` \| `stt`) |
 | PUT | `/api/servers/:id` | Update / enable / disable |
 | DELETE | `/api/servers/:id` | Remove |
 | POST | `/api/servers/:id/refresh` | Probe one host now |
@@ -439,6 +474,7 @@ Optional **agent** (future / custom): if `http://<host>:9100/stats` returns GPU/
 | GET | `/api/models` | Aggregated models |
 | POST | `/api/route` | Preview routing decision |
 | POST | `/v1/chat/completions` | OpenAI-compatible proxy |
+| POST | `/v1/audio/transcriptions` | OpenAI-compatible local Whisper STT |
 | GET | `/v1/models` | OpenAI model list |
 | POST | `/api/chat` | Ollama-compatible proxy |
 
@@ -454,6 +490,7 @@ LLMrouterVEX/
     discovery.js    # probes + runtime stats
     modelRouter.js  # scoring / model choice
     proxy.js        # OpenAI ↔ Ollama
+    stt.js          # OpenAI STT → local Whisper
     config.js
   public/           # dashboard UI
   deploy/

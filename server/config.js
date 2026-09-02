@@ -14,6 +14,16 @@ module.exports = {
   PROBE_TIMEOUT_MS: Number(process.env.PROBE_TIMEOUT_MS || 4000),
   /** Default Ollama API port when only IP is provided */
   DEFAULT_OLLAMA_PORT: Number(process.env.DEFAULT_OLLAMA_PORT || 11434),
+  /** Default Whisper / OpenAI-STT port when kind=stt and only IP is provided */
+  DEFAULT_STT_PORT: Number(process.env.DEFAULT_STT_PORT || 8090),
+  /**
+   * Optional single STT backend (OpenAI-compatible Whisper).
+   * Example: http://gpu-box:8090/v1
+   * Apps still call THIS router at /v1/audio/transcriptions.
+   */
+  STT_BACKEND_URL: (process.env.STT_BACKEND_URL || "").replace(/\/$/, ""),
+  /** openai | whisper.cpp | auto */
+  STT_BACKEND_API: process.env.STT_BACKEND_API || "auto",
   /**
    * Max concurrent generations per backend server.
    * Extra requests wait in a FIFO queue and receive queue-position events.

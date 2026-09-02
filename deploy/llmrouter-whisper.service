@@ -1,0 +1,22 @@
+[Unit]
+Description=LLMrouterVEX local Whisper STT (OpenAI-compatible)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whisper
+Group=whisper
+WorkingDirectory=/opt/llmrouter-whisper
+Environment=HOST=0.0.0.0
+Environment=PORT=8090
+Environment=WHISPER_MODEL=base
+Environment=WHISPER_DEVICE=auto
+ExecStart=/opt/llmrouter-whisper/venv/bin/python /opt/llmrouter-whisper/server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

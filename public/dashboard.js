@@ -63,13 +63,13 @@ function renderServerCard(s) {
       <div class="card-head">
         <div>
           <h3>${esc(s.name)}</h3>
-          <div class="mono small muted">${esc(s.baseUrl)}</div>
+          <div class="mono small muted">${esc(s.baseUrl)} · ${esc((s.kind || rt.kind || "ollama") === "stt" ? "STT" : "Ollama")}</div>
         </div>
         <span class="badge ${!s.enabled ? "muted" : healthy ? "ok" : "bad"}">
           ${!s.enabled ? "disabled" : healthy ? "online" : "offline"}
         </span>
       </div>
-      <div class="kv"><span>Ollama</span><span class="mono">${esc(rt.version || "—")}</span></div>
+      <div class="kv"><span>${(s.kind || rt.kind) === "stt" ? "STT" : "Ollama"}</span><span class="mono">${esc(rt.version || "—")}</span></div>
       <div class="kv"><span>Latency</span><span class="mono">${rt.latencyMs != null ? rt.latencyMs + " ms" : "—"}</span></div>
       <div class="kv"><span>Requests / errors</span><span class="mono">${rt.stats?.requests ?? 0} / ${rt.stats?.errors ?? 0}</span></div>
       ${rt.lastError && !healthy ? `<div class="small" style="color:var(--danger)">${esc(rt.lastError)}</div>` : ""}

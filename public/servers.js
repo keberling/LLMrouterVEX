@@ -27,6 +27,7 @@ function renderList(servers) {
     .map((s) => {
       const rt = s.runtime || {};
       const healthy = Boolean(rt.healthy);
+      const kind = s.kind || rt.kind || "ollama";
       const models = (rt.models || [])
         .slice(0, 8)
         .map((m) => `<span class="chip">${esc(m.name)}</span>`)
@@ -35,7 +36,7 @@ function renderList(servers) {
       <article class="card${!s.enabled || !healthy ? " offline" : ""}" data-id="${esc(s.id)}">
         <div class="card-head">
           <div>
-            <h3>${esc(s.name)}</h3>
+            <h3>${esc(s.name)} <span class="chip">${esc(kind === "stt" ? "STT" : "Ollama")}</span></h3>
             <div class="mono small muted">${esc(s.baseUrl)}</div>
           </div>
           <span class="badge ${!s.enabled ? "muted" : healthy ? "ok" : "bad"}">
@@ -142,6 +143,7 @@ $("#add-form").addEventListener("submit", async (e) => {
   const host = $("#host").value.trim();
   const name = $("#name").value.trim();
   const notes = $("#notes").value.trim();
+  const kind = $("#kind")?.value || "ollama";
   const btn = $("#add-btn");
   const status = $("#add-status");
   btn.disabled = true;
@@ -150,7 +152,7 @@ $("#add-form").addEventListener("submit", async (e) => {
     const r = await fetch("/api/servers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host, name: name || undefined, notes }),
+      body: JSON.stringify({ host, name: name || undefined, notes, kind }),
     });
     const data = await r.json();
     if (!data.ok) throw new Error(data.error || "Failed");
@@ -240,6 +242,21 @@ $("#server-list").addEventListener("click", async (e) => {
     btn.disabled = false;
   }
 });
+
+const kindEl = $("#kind");
+if (kindEl) {
+  kindEl.addEventListener("change", () => {
+    const help = $("#host-help");
+    if (!help) return;
+    if (kindEl.value === "stt") {
+      help.innerHTML =
+        'Port defaults to <strong>8090</strong> for Whisper. Run <code class="mono">deploy/install-whisper.sh</code> on a GPU box, then add that host here.';
+    } else {
+      help.innerHTML =
+        "Port defaults to <strong>11434</strong> for Ollama, <strong>8090</strong> for Whisper. Use LAN IP, <strong>Tailscale IP</strong>, or MagicDNS name.";
+    }
+  });
+}
 
 load().catch((e) => toast(e.message, false));
 setInterval(() => load().catch(() => {}), 10000);

@@ -13,7 +13,7 @@
           <div class="logo">R</div>
           <div>
             <h1>Manage servers</h1>
-            <p>Add Ollama hosts by IP — models discover automatically</p>
+            <p>Add Ollama hosts and Whisper STT backends — models discover automatically</p>
           </div>
         </div>
         <nav class="nav">
@@ -23,8 +23,18 @@
       </header>
 
       <section class="form-card">
-        <h2>Add Ollama server</h2>
+        <h2>Add server</h2>
         <form id="add-form">
+          <label for="kind">Kind</label>
+          <select id="kind" name="kind">
+            <option value="ollama" selected>Ollama (chat / LLM)</option>
+            <option value="stt">Whisper STT (speech-to-text)</option>
+          </select>
+          <p class="help">
+            Chat goes to Ollama. Voice Portal transcriptions go to a Whisper host
+            (<code class="mono">POST /v1/audio/transcriptions</code> on this router).
+          </p>
+
           <label for="host">Host / IP / Tailscale name (required)</label>
           <input
             id="host"
@@ -34,9 +44,9 @@
             required
             autocomplete="off"
           />
-          <p class="help">
-            Port defaults to <strong>11434</strong>. Use LAN IP, <strong>Tailscale IP</strong>, or MagicDNS name.
-            Workers need Ollama bound to <code class="mono">0.0.0.0:11434</code>.
+          <p class="help" id="host-help">
+            Port defaults to <strong>11434</strong> for Ollama, <strong>8090</strong> for Whisper.
+            Use LAN IP, <strong>Tailscale IP</strong>, or MagicDNS name.
           </p>
 
           <label for="name">Display name (optional)</label>

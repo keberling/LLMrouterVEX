@@ -39,7 +39,17 @@ function getServer(id) {
   return listServers().find((s) => s.id === id) || null;
 }
 
-function normalizeHost(input) {
+function normalizeKind(kind) {
+  const k = String(kind || "ollama").toLowerCase().trim();
+  return k === "stt" || k === "whisper" ? "stt" : "ollama";
+}
+
+function defaultPortForKind(kind) {
+  const config = require("./config");
+  return kind === "stt" ? config.DEFAULT_STT_PORT : config.DEFAULT_OLLAMA_PORT;
+}
+
+function normalizeHost(input, { defaultPort } = {}) {
   let raw = String(input || "").trim();
   if (!raw) throw new Error("Host is required");
   // Allow full URL or bare IP/hostname
@@ -53,9 +63,9 @@ function normalizeHost(input) {
     throw new Error("Invalid host/URL");
   }
   if (!url.port) {
-    url.port = String(require("./config").DEFAULT_OLLAMA_PORT);
+    url.port = String(defaultPort || require("./config").DEFAULT_OLLAMA_PORT);
   }
-  // Ollama base without trailing slash
+  // Origin without trailing slash (path like /v1 is ignored; we add API paths)
   const baseUrl = `${url.protocol}//${url.hostname}:${url.port}`;
   return {
     baseUrl,
@@ -64,8 +74,16 @@ function normalizeHost(input) {
   };
 }
 
-function addServer({ name, host, enabled = true, notes = "" }) {
-  const norm = normalizeHost(host);
+function addServer({
+  name,
+  host,
+  enabled = true,
+  notes = "",
+  kind = "ollama",
+  sttApi = "auto",
+}) {
+  const kindNorm = normalizeKind(kind);
+  const norm = normalizeHost(host, { defaultPort: defaultPortForKind(kindNorm) });
   const store = readStore();
   const duplicate = store.servers.find(
     (s) => s.baseUrl.toLowerCase() === norm.baseUrl.toLowerCase()
@@ -79,6 +97,8 @@ function addServer({ name, host, enabled = true, notes = "" }) {
     host: norm.host,
     port: norm.port,
     baseUrl: norm.baseUrl,
+    kind: kindNorm,
+    sttApi: kindNorm === "stt" ? String(sttApi || "auto") : undefined,
     enabled: Boolean(enabled),
     notes: notes || "",
     createdAt: new Date().toISOString(),
@@ -99,8 +119,13 @@ function updateServer(id, patch = {}) {
   if (patch.name != null) next.name = String(patch.name).trim();
   if (patch.notes != null) next.notes = String(patch.notes);
   if (patch.enabled != null) next.enabled = Boolean(patch.enabled);
+  if (patch.kind != null) next.kind = normalizeKind(patch.kind);
+  if (patch.sttApi != null) next.sttApi = String(patch.sttApi || "auto");
   if (patch.host != null && String(patch.host).trim()) {
-    const norm = normalizeHost(patch.host);
+    const kind = patch.kind != null ? normalizeKind(patch.kind) : next.kind || "ollama";
+    const norm = normalizeHost(patch.host, {
+      defaultPort: defaultPortForKind(kind),
+    });
     next.host = norm.host;
     next.port = norm.port;
     next.baseUrl = norm.baseUrl;
@@ -127,5 +152,6 @@ module.exports = {
   updateServer,
   deleteServer,
   normalizeHost,
+  normalizeKind,
   ensureDataDir,
 };

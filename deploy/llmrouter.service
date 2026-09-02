@@ -13,6 +13,7 @@ Environment=PORT=8080
 Environment=HOST=0.0.0.0
 Environment=LLMROUTER_DATA=/var/lib/llmroutervex
 # Optional: Environment=LLMROUTER_API_TOKEN=change-me
+# Optional local Whisper: Environment=STT_BACKEND_URL=http://gpu-box:8090/v1
 ExecStart=/usr/bin/node /opt/llmroutervex/server/index.js
 Restart=on-failure
 RestartSec=3

@@ -1,9 +1,11 @@
 const express = require("express");
 const path = require("path");
 const { randomUUID } = require("crypto");
+const multer = require("multer");
 const config = require("./config");
 const store = require("./store");
 const discovery = require("./discovery");
+const stt = require("./stt");
 const {
   pickRoute,
   openaiToOllamaMessages,
@@ -21,6 +23,11 @@ store.ensureDataDir();
 const app = express();
 app.use(express.json({ limit: "32mb" }));
 app.use(express.static(path.join(config.ROOT, "public")));
+
+const sttUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 },
+});
 
 /** Optional API auth for proxy endpoints */
 function requireApiToken(req, res, next) {
@@ -82,8 +89,9 @@ app.get("/api/health", async (_req, res) => {
   res.json({
     ok: true,
     service: "LLMrouterVEX",
-    version: "1.0.0",
+    version: "1.1.0",
     totals: summary.totals,
+    stt: stt.sttStatus(),
     tailscale: {
       installed: Boolean(ts.installed),
       running: Boolean(ts.running),
@@ -171,9 +179,9 @@ app.get("/api/servers", (_req, res) => {
 
 app.post("/api/servers", async (req, res) => {
   try {
-    const { name, host, notes, enabled } = req.body || {};
+    const { name, host, notes, enabled, kind, sttApi } = req.body || {};
     if (!host) return res.status(400).json({ ok: false, error: "host is required" });
-    const server = store.addServer({ name, host, notes, enabled });
+    const server = store.addServer({ name, host, notes, enabled, kind, sttApi });
     discovery.ensureRuntime(server);
     await discovery.probeServer(server);
     res.status(201).json({
@@ -251,24 +259,73 @@ app.post("/api/route", (req, res) => {
 
 app.get("/v1/models", requireApiToken, (_req, res) => {
   const { models } = discovery.catalogSummary();
+  const created = Math.floor(Date.now() / 1000);
+  const data = [
+    {
+      id: "auto",
+      object: "model",
+      created,
+      owned_by: "llmroutervex",
+    },
+    ...models.map((m) => ({
+      id: m.name,
+      object: "model",
+      created,
+      owned_by: "ollama",
+    })),
+  ];
+  if (stt.pickSttTarget()) {
+    data.push({
+      id: "whisper-1",
+      object: "model",
+      created,
+      owned_by: "llmroutervex-stt",
+    });
+  }
   res.json({
     object: "list",
-    data: [
-      {
-        id: "auto",
-        object: "model",
-        created: Math.floor(Date.now() / 1000),
-        owned_by: "llmroutervex",
-      },
-      ...models.map((m) => ({
-        id: m.name,
-        object: "model",
-        created: Math.floor(Date.now() / 1000),
-        owned_by: "ollama",
-      })),
-    ],
+    data,
   });
 });
+
+app.post(
+  "/v1/audio/transcriptions",
+  requireApiToken,
+  sttUpload.single("file"),
+  async (req, res) => {
+    try {
+      if (!req.file?.buffer?.length) {
+        return res.status(400).json({
+          error: { message: "file is required (multipart field name: file)" },
+        });
+      }
+      const result = await stt.transcribe({
+        buffer: req.file.buffer,
+        filename: req.file.originalname || "audio",
+        contentType: req.file.mimetype,
+        model: req.body?.model || "whisper-1",
+        language: req.body?.language,
+        responseFormat: req.body?.response_format || "json",
+        temperature: req.body?.temperature,
+      });
+      res.setHeader("X-Router-STT", result.backend?.name || "stt");
+      if ((req.body?.response_format || "json") === "text") {
+        res.type("text/plain").send(result.text);
+        return;
+      }
+      res.json({
+        text: result.text,
+        model: result.model,
+        task: "transcribe",
+      });
+    } catch (err) {
+      const status = err.status || 502;
+      res.status(status).json({
+        error: { message: err.message || "Transcription failed", type: "stt_error" },
+      });
+    }
+  }
+);
 
 app.post("/v1/chat/completions", requireApiToken, async (req, res) => {
   const body = req.body || {};
@@ -698,8 +755,20 @@ async function main() {
     console.log(`  Dashboard  → http://0.0.0.0:${config.PORT}/`);
     console.log(`  Servers    → http://0.0.0.0:${config.PORT}/servers`);
     console.log(`  OpenAI API → http://0.0.0.0:${config.PORT}/v1/chat/completions`);
+    console.log(`  STT API    → http://0.0.0.0:${config.PORT}/v1/audio/transcriptions`);
     console.log(`  Ollama API → http://0.0.0.0:${config.PORT}/api/chat`);
-    console.log(`  Data dir   → ${config.DATA_DIR}\n`);
+    console.log(`  Data dir   → ${config.DATA_DIR}`);
+    const sttInfo = stt.sttStatus();
+    if (sttInfo.configured) {
+      console.log(
+        `  STT        → ${sttInfo.backends.map((b) => b.name + (b.healthy ? "" : " (down)")).join(", ")}`
+      );
+    } else {
+      console.log(
+        `  STT        → not configured (add kind=stt server or STT_BACKEND_URL)`
+      );
+    }
+    console.log("");
   });
 }
 
